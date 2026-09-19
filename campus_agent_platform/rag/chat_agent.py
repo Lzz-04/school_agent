@@ -73,6 +73,13 @@ class ChatAgent:
         self.user_id = user_id        # 当前学生（由 ask 调用时覆盖）
         self._pending_draft: dict | None = None  # 当轮 LLM 产出的申请表单草稿
 
+    def _role_of(self, user_id: str) -> str | None:
+        """查用户角色；DB 无记录返回 None。"""
+        row = self.db.execute(
+            "SELECT role FROM users WHERE user_id=?", (user_id,)
+        ).fetchone()
+        return row["role"] if row else None
+
     # ------------------------------------------------------------------
     def create_session(self, user_id: str, title: str = "") -> dict:
         sid = "S-" + uuid.uuid4().hex[:12].upper()
@@ -106,7 +113,6 @@ class ChatAgent:
         return True
 
     def history(self, session_id: str) -> list[dict]:
-        import json
         rows = self.db.execute(
             "SELECT id, role, content, attachments, form_draft, created_at FROM chat_messages WHERE session_id=? "
             "ORDER BY created_at ASC",
@@ -124,7 +130,6 @@ class ChatAgent:
     def ask(self, session_id: str, user_id: str, question: str,
             attachments: list[dict] | None = None) -> dict:
         """attachments: [{"url": "...", "name": "...", "type": "image/file"}]"""
-        import json
         attachments = attachments or []
         self.user_id = user_id
         # 1. 短期记忆：取最近 N 条
@@ -151,8 +156,7 @@ class ChatAgent:
 
         # 3. 生成回答（LLM 可能产出申请表单草稿 _pending_draft）
         # 【关键词直触】辅导员说自动审核/批量审批，直接跑工具，不等 LLM 决策
-        _urow = self.db.execute("SELECT role FROM users WHERE user_id=?", (user_id,)).fetchone()
-        if _urow and _urow["role"] == "counselor" and any(k in question for k in ("自动审核", "批量审批", "自动审批", "审一下待办", "审核待办", "帮我审")):
+        if self._role_of(user_id) == "counselor" and any(k in question for k in ("自动审核", "批量审批", "自动审批", "审一下待办", "审核待办", "帮我审")):
             answer = self._run_auto_review()
             cited = []
         else:
@@ -254,8 +258,7 @@ class ChatAgent:
         )
 
         # 查当前用户角色：辅导员可见自动审核能力
-        _urow = self.db.execute("SELECT role FROM users WHERE user_id=?", (self.user_id,)).fetchone()
-        _role = _urow["role"] if _urow else "student"
+        _role = self._role_of(self.user_id) or "student"
         counselor_hint = ""
         if _role == "counselor":
             counselor_hint = (
@@ -345,10 +348,7 @@ class ChatAgent:
 
         if data.get("action") == "auto_review":
             # 【自动审核工具】安全兜底：仅辅导员可执行（LLM 输出不受信任）
-            _urow = self.db.execute(
-                "SELECT role FROM users WHERE user_id=?", (self.user_id,)
-            ).fetchone()
-            if not (_urow and _urow["role"] == "counselor"):
+            if self._role_of(self.user_id) != "counselor":
                 return "抱歉，只有辅导员可以执行自动审核。如需审核请假单，请联系辅导员。"
             return self._run_auto_review()
 
@@ -399,7 +399,7 @@ class ChatAgent:
 
     def _run_auto_review(self) -> str:
         """按规则自动审核当前辅导员的待办请假单，返回自然语言摘要。"""
-        from datetime import date as _date
+        from ..workflows import rules as R
         approver = self.user_id
         all_reqs = self.engine.requests.list_all()
         approves, rejects, skipped = [], [], []
@@ -408,32 +408,9 @@ class ChatAgent:
                 continue
             if r.status != "pending_counselor":
                 continue
-            p = r.payload or {}
-            start = p.get("start_date"); end = p.get("end_date")
-            leave_type = p.get("leave_type", "")
-            reason = (p.get("reason") or "").strip()
-            atts = r.attachment_urls or []
-            violations = []
-            if not start or not end:
-                violations.append("起止日期必填")
-            else:
-                try:
-                    ds = _date.fromisoformat(str(start)); de = _date.fromisoformat(str(end))
-                    if ds < _date.today(): violations.append("开始日期早于今天")
-                    if de < ds: violations.append("结束日期早于开始")
-                except ValueError:
-                    violations.append("日期格式错误")
-            if leave_type == "sick" and not atts:
-                violations.append("病假缺证明材料")
-            if not reason:
-                violations.append("请假事由为空")
-            days = 0
-            if start and end:
-                try:
-                    ds = _date.fromisoformat(str(start)); de = _date.fromisoformat(str(end))
-                    days = (de - ds).days + 1
-                except ValueError:
-                    pass
+            violations, days = R.evaluate_leave_auto_review(
+                r.payload or {}, r.attachment_urls or []
+            )
             if days > 7:
                 skipped.append((r.request_no, f"请假{days}天需学校领导审"))
                 continue

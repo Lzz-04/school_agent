@@ -213,6 +213,12 @@ class WorkflowEngine:
             payload=payload,
         )
 
+    def _applicant_name(self, applicant_id: str) -> str:
+        row = self.db.execute(
+            "SELECT name FROM users WHERE user_id=?", (applicant_id,)
+        ).fetchone()
+        return row["name"] if row else ""
+
     def _resolve_nodes(self, process_type: str, payload: dict[str, Any]) -> list[ProcessTemplateNode] | None:
         """按业务规则解析本单实际审批链。
 
@@ -480,15 +486,11 @@ class WorkflowEngine:
                 f"仅终态申请可归档: {request_no} (status={req.status})"
             )
 
-        row = self.db.execute(
-            "SELECT name FROM users WHERE user_id=?", (req.applicant_id,)
-        ).fetchone()
-        applicant_name = row["name"] if row else ""
         content = json.dumps(
             {
                 "request_no": req.request_no,
                 "applicant_id": req.applicant_id,
-                "applicant_name": applicant_name,
+                "applicant_name": self._applicant_name(req.applicant_id),
                 "process_type": req.process_type,
                 "payload": req.payload,
                 "status": req.status,
@@ -550,14 +552,10 @@ class WorkflowEngine:
 
     def status_view(self, request_no: str) -> dict[str, Any]:
         req = self.requests.get(request_no)
-        row = self.db.execute(
-            "SELECT name FROM users WHERE user_id=?", (req.applicant_id,)
-        ).fetchone()
-        applicant_name = row["name"] if row else ""
         return {
             "request_no": req.request_no,
             "applicant_id": req.applicant_id,
-            "applicant_name": applicant_name,
+            "applicant_name": self._applicant_name(req.applicant_id),
             "process_type": req.process_type,
             "status": req.status,
             "current_node_id": req.current_node_id,

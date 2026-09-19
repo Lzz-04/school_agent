@@ -30,7 +30,10 @@ from ..app import CampusAgentApp
 from ..auth import AuthError, decode_token
 from ..domain import constants as C
 from ..domain.errors import DomainError
+from ..domain.models import AuditEvent
 from ..storage.repository import TemplateRepository
+from ..tools import registry as tools
+from ..workflows import rules as R
 
 
 # ----------------------------------------------------------------------
@@ -173,8 +176,7 @@ def create_app(app_container: CampusAgentApp | None = None) -> FastAPI:
         out = []
         for r in reqs:
             d = r.model_dump()
-            row = engine.db.execute("SELECT name FROM users WHERE user_id=?", (d.get("applicant_id"),)).fetchone()
-            d["applicant_name"] = row["name"] if row else ""
+            d["applicant_name"] = engine._applicant_name(d.get("applicant_id", ""))
             out.append(d)
         return out
 
@@ -202,37 +204,14 @@ def create_app(app_container: CampusAgentApp | None = None) -> FastAPI:
         engine = _c().engine
         all_reqs = engine.requests.list_all()
         approves, rejects, skipped = [], [], []
-        from datetime import date as _date
         for r in all_reqs:
             if r.process_type != "leave":
                 continue
             if r.status != "pending_counselor":
                 continue
-            p = r.payload or {}
-            start = p.get("start_date"); end = p.get("end_date")
-            leave_type = p.get("leave_type", "")
-            reason = (p.get("reason") or "").strip()
-            atts = r.attachment_urls or []
-            violations = []
-            if not start or not end:
-                violations.append("起止日期必填")
-            else:
-                try:
-                    ds = _date.fromisoformat(str(start)); de = _date.fromisoformat(str(end))
-                    if ds < _date.today(): violations.append("开始日期早于今天")
-                    if de < ds: violations.append("结束日期早于开始")
-                except ValueError:
-                    violations.append("日期格式错误")
-            if leave_type == "sick" and not atts:
-                violations.append("病假缺证明材料")
-            if not reason:
-                violations.append("请假事由为空")
-            days = 0
-            if start and end:
-                try:
-                    ds = _date.fromisoformat(str(start)); de = _date.fromisoformat(str(end))
-                    days = (de - ds).days + 1
-                except ValueError: pass
+            violations, days = R.evaluate_leave_auto_review(
+                r.payload or {}, r.attachment_urls or []
+            )
             if days > 7:
                 skipped.append({"request_no": r.request_no, "reason": f"请假{days}天，需学校领导审批"})
                 continue
@@ -272,7 +251,6 @@ def create_app(app_container: CampusAgentApp | None = None) -> FastAPI:
     @app.get("/api/v1/courses")
     def list_courses(course_ids: str = Query(..., description="逗号分隔课程编号")):
         ids = [c.strip() for c in course_ids.split(",") if c.strip()]
-        from ..workflows import rules as R
         return {"courses": {
             cid: {"exists": cid in R.COURSE_CATALOG,
                   **({k: v for k, v in R.COURSE_CATALOG[cid].items()} if cid in R.COURSE_CATALOG else {})}
@@ -290,7 +268,6 @@ def create_app(app_container: CampusAgentApp | None = None) -> FastAPI:
     @app.post("/api/v1/notifications")
     def send_notification(body: SendNotificationRequest):
         engine = _c().engine
-        from ..domain.models import AuditEvent
         msg = engine.outbox.enqueue(
             request_no=body.request_no,
             recipient_id=body.recipient_id,
@@ -315,7 +292,6 @@ def create_app(app_container: CampusAgentApp | None = None) -> FastAPI:
     # ------------------------- 权限 -------------------------
     @app.post("/api/v1/check-permission")
     def check_permission(body: CheckPermissionRequest):
-        from ..tools import registry as tools
         res = tools.call_tool(
             "check_permission",
             user_id=body.user_id, action=body.action, resource_no=body.resource_no,

@@ -334,3 +334,50 @@ def resolve_venue_nodes(payload: dict) -> list[dict[str, str]]:
         return []
     # 未知类型或其他场地默认走人工审核（兜底，避免漏审）
     return [{"node_id": "venue", "approver_role": "logistics"}]
+
+
+# ----------------------------------------------------------------------
+# 辅导员自动审核：单条请假单的纯规则评估（对话端 / API 端共用）
+# ----------------------------------------------------------------------
+def evaluate_leave_auto_review(payload: dict, attachment_urls: list[str]) -> tuple[list[str], int]:
+    """评估单条待审请假单，返回 (violations, days)。
+
+    判定：
+    - violations 非空 → 应自动驳回；
+    - days > 7 → 超辅导员权限，应跳过（转学校领导）；
+    - violations 为空且 days <= 7 → 应自动通过。
+    违规措辞保持与原对话/API 两端一致，仅合并重复判断。
+    """
+    start = payload.get("start_date")
+    end = payload.get("end_date")
+    leave_type = payload.get("leave_type", "")
+    reason = (payload.get("reason") or "").strip()
+    atts = attachment_urls or []
+
+    violations: list[str] = []
+    if not start or not end:
+        violations.append("起止日期必填")
+    else:
+        try:
+            ds = date.fromisoformat(str(start))
+            de = date.fromisoformat(str(end))
+            if ds < date.today():
+                violations.append("开始日期早于今天")
+            if de < ds:
+                violations.append("结束日期早于开始")
+        except ValueError:
+            violations.append("日期格式错误")
+    if leave_type == "sick" and not atts:
+        violations.append("病假缺证明材料")
+    if not reason:
+        violations.append("请假事由为空")
+
+    days = 0
+    if start and end:
+        try:
+            ds = date.fromisoformat(str(start))
+            de = date.fromisoformat(str(end))
+            days = (de - ds).days + 1
+        except ValueError:
+            pass
+    return violations, days
