@@ -1,0 +1,26 @@
+﻿.env
+__pycache__/
+*.pyc
+campus_agent_platform/data/
+
+# Python
+.venv/
+venv/
+.pytest_cache/
+*.egg-info/
+
+# Node / frontend
+node_modules/
+dist/
+build/
+*.tsbuildinfo
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+
+# Runtime / artifacts
+uploads/
+.test_data/
+*.log
