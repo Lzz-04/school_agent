@@ -38,7 +38,7 @@ SEED_TEMPLATES = [
             {"node_id": "advisor", "approver_role": C.ROLE_ADVISOR},
             {"node_id": "college", "approver_role": C.ROLE_COLLEGE_ADMIN},
         ],
-        "validation_rules": ["course_quota", "prerequisite", "schedule_conflict"],
+        "validation_rules": ["course_quota", "schedule_conflict"],
     },
     {
         "process_type": C.PROCESS_REIMBURSEMENT,

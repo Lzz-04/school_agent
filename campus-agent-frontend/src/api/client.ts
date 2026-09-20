@@ -61,6 +61,8 @@ export const api = {
   listRequests: (applicantId?: string) =>
     req("/api/v1/requests" + (applicantId ? "?applicant_id=" + encodeURIComponent(applicantId) : "")),
   getRequest: (no: string) => req("/api/v1/requests/" + encodeURIComponent(no)),
+  listCourses: () => req("/api/v1/courses"),
+  listVenues: () => req("/api/v1/venues"),
   submit: (body: any) => req("/api/v1/requests", { method: "POST", body: JSON.stringify(body) }),
   advance: (body: { request_no: string; approver_id: string; decision: string; comment?: string }) =>
     req(`/api/v1/requests/${encodeURIComponent(body.request_no)}/advance`, {
@@ -87,6 +89,7 @@ export const api = {
   chatCreateSession: (body: { title: string }) => req("/api/v1/chat/sessions", { method: "POST", body: JSON.stringify(body) }),
   chatDeleteSession: (sid: string) => req("/api/v1/chat/sessions/" + encodeURIComponent(sid), { method: "DELETE" }),
   chatMessages: (sid: string) => req(`/api/v1/chat/sessions/${encodeURIComponent(sid)}/messages`),
+  chatSaveFormResult: (mid: string, body: any) => req("/api/v1/chat/messages/" + encodeURIComponent(mid) + "/form-result", { method: "POST", body: JSON.stringify(body) }),
   chatAsk: (sid: string, question: string, attachments: any[] = []) =>
     req(`/api/v1/chat/sessions/${encodeURIComponent(sid)}/ask`, {
       method: "POST", body: JSON.stringify({ question, attachments }),
@@ -97,6 +100,13 @@ export const api = {
   adminStudents: () => req("/api/v1/admin/students"),
   adminAddStudents: (body: any) => req("/api/v1/admin/students", { method: "POST", body: JSON.stringify(body) }),
   adminDeleteStudent: (uid: string) => req(`/api/v1/admin/students/${encodeURIComponent(uid)}`, { method: "DELETE" }),
+  adminAssignStudentClass: (uid: string, classId: string) => req(`/api/v1/admin/students/${encodeURIComponent(uid)}/assign-class`, { method: "POST", body: JSON.stringify({ class_id: classId }) }),
+  adminClasses: () => req("/api/v1/admin/classes"),
+  adminCounselors: () => req("/api/v1/admin/counselors"),
+  adminCreateClass: (body: any) => req("/api/v1/admin/classes", { method: "POST", body: JSON.stringify(body) }),
+  adminDeleteClass: (cid: string) => req(`/api/v1/admin/classes/${encodeURIComponent(cid)}`, { method: "DELETE" }),
+  adminAssignClassCounselor: (cid: string, cid2: string) => req(`/api/v1/admin/classes/${encodeURIComponent(cid)}/assign-counselor`, { method: "POST", body: JSON.stringify({ counselor_id: cid2 }) }),
+  myClasses: () => req("/api/v1/counselor/my-classes"),
 };
 
 // 文件上传（FormData，非 JSON）

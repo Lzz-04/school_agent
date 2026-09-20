@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sqlite3
 import time
 from typing import Any, Callable
 
@@ -50,6 +51,14 @@ class PermissionMatrix:
 
     # 动作级授权（粗粒度）：哪些角色可以执行哪些动作
     ROLE_ACTIONS: dict[str, set[str]] = {
+        # 管理员：平台全权限（含注册模板 / 归档 / 审批）
+        "admin": {
+            C.ACTION_SUBMIT, C.ACTION_VIEW, C.ACTION_RETURN,
+            C.ACTION_APPROVE, C.ACTION_REJECT,
+            C.ACTION_ARCHIVE, C.ACTION_VALIDATE, C.ACTION_NOTIFY,
+            C.ACTION_REGISTER_TEMPLATE, C.ACTION_QUERY_COURSES,
+            C.ACTION_CHECK_LIMIT,
+        },
         C.ROLE_STUDENT: {
             C.ACTION_SUBMIT, C.ACTION_VIEW, C.ACTION_RETURN, C.ACTION_QUERY_COURSES,
         },
@@ -57,7 +66,7 @@ class PermissionMatrix:
             C.ACTION_APPROVE, C.ACTION_REJECT, C.ACTION_RETURN, C.ACTION_VIEW,
         },
         C.ROLE_COUNSELOR: {
-            C.ACTION_APPROVE, C.ACTION_REJECT, C.ACTION_RETURN, C.ACTION_VIEW,
+            C.ACTION_SUBMIT, C.ACTION_APPROVE, C.ACTION_REJECT, C.ACTION_RETURN, C.ACTION_VIEW,
         },
         C.ROLE_COLLEGE_ADMIN: {
             C.ACTION_APPROVE, C.ACTION_REJECT, C.ACTION_RETURN, C.ACTION_VIEW,
@@ -219,6 +228,57 @@ class WorkflowEngine:
         ).fetchone()
         return row["name"] if row else ""
 
+    def _check_venue_time_conflict(self, payload: dict[str, Any]) -> None:
+        """场地预约防重复：同一物理场地、时段重叠且占用中（approved/pending_*/returned）即拒。
+        占用口径：approved ∪ pending_* ∪ returned；rejected/archived/draft 释放。
+        重叠判定：新开始 < 旧结束 且 新结束 > 旧开始（边界相接不算冲突）。
+        """
+        from datetime import datetime
+        venue_id = str(payload.get("venue_id", "")).strip()
+        venue_name = str(payload.get("venue_name", "")).strip()
+        start_s = str(payload.get("start_time", ""))
+        end_s = str(payload.get("end_time", ""))
+        try:
+            ns = datetime.strptime(start_s, "%Y-%m-%d %H:%M")
+            ne = datetime.strptime(end_s, "%Y-%m-%d %H:%M")
+        except ValueError:
+            return  # 时间格式由 venue_conflict 规则负责
+        rows = self.db.execute(
+            "SELECT payload, status FROM approval_requests WHERE process_type = ?",
+            (C.PROCESS_VENUE_RESERVATION,),
+        ).fetchall()
+        for row in rows:
+            status = row["status"]
+            occupied = (
+                status == C.STATUS_APPROVED
+                or status.startswith(C.STATUS_PENDING_PREFIX)
+                or status == C.STATUS_RETURNED
+            )
+            if not occupied:
+                continue
+            old = json.loads(row["payload"] or "{}")
+            old_vid = str(old.get("venue_id", "")).strip()
+            # 同一物理场地：优先 venue_id；旧单无 venue_id 时按 venue_name 兜底
+            if venue_id:
+                if old_vid != venue_id:
+                    continue
+            elif str(old.get("venue_name", "")) != venue_name:
+                continue
+            os_ = old.get("start_time")
+            oe_ = old.get("end_time")
+            if not os_ or not oe_:
+                continue
+            try:
+                os_dt = datetime.strptime(str(os_), "%Y-%m-%d %H:%M")
+                oe_dt = datetime.strptime(str(oe_), "%Y-%m-%d %H:%M")
+            except ValueError:
+                continue
+            if ns < oe_dt and ne > os_dt:
+                raise ValidationError(
+                    "场地时段冲突",
+                    details={"conflict": f"该场地在 {os_} ~ {oe_} 已被占用，请选择其他时段"},
+                )
+
     def _resolve_nodes(self, process_type: str, payload: dict[str, Any]) -> list[ProcessTemplateNode] | None:
         """按业务规则解析本单实际审批链。
 
@@ -229,6 +289,8 @@ class WorkflowEngine:
             return [ProcessTemplateNode(**n) for n in R.resolve_leave_nodes(payload)]
         if process_type == C.PROCESS_VENUE_RESERVATION:
             return [ProcessTemplateNode(**n) for n in R.resolve_venue_nodes(payload)]
+        if process_type == C.PROCESS_COURSE_SELECTION:
+            return []  # 选课零节点：提交即自动通过（不进人工审批）
         return None
 
     def _effective_nodes(
@@ -255,9 +317,17 @@ class WorkflowEngine:
         self.limiter.check(applicant_id)
         self.matrix.require(applicant_id, C.ACTION_SUBMIT, detail="提交申请")
 
-        # 幂等：同 client_request_no 直接返回已有记录
+        # 学生端不开放报销：学生提交报销一律拒绝
+        if process_type == C.PROCESS_REIMBURSEMENT and C.ROLE_STUDENT in self.matrix.roles_of(applicant_id):
+            raise PermissionDeniedError(
+                "学生端暂不支持报销申请，请联系辅导员或财务处",
+                details={"applicant_id": applicant_id, "process_type": process_type},
+            )
+
+        # 幂等：同 (applicant_id, client_request_no) 直接返回已有记录（作用域 = 申请人，
+        # 不同申请人撞键互不干扰，见 database.py 复合唯一索引）
         if client_request_no:
-            existing = self.requests.get_by_client_no(client_request_no)
+            existing = self.requests.get_by_client_no(client_request_no, applicant_id)
             if existing is not None:
                 return existing
 
@@ -267,6 +337,10 @@ class WorkflowEngine:
         template = self.templates.get_latest(process_type)
         # 业务规则校验（规则绑定自模板 validation_rules）
         R.ensure_valid(template.validation_rules, payload)
+
+        # 场地预约：同场地时段重叠防重复占用（需查历史单，引擎层做）
+        if process_type == C.PROCESS_VENUE_RESERVATION:
+            self._check_venue_time_conflict(payload)
 
         # 解析本单实际审批链：None=回退模板；[]=零节点自动通过；非空=人工链
         resolved = self._resolve_nodes(process_type, payload)
@@ -301,7 +375,11 @@ class WorkflowEngine:
         with self.db.transaction():
             self.requests.insert(req)
             if auto_approved:
-                # 零节点（如教室）：自动通过，直接通知申请人 approved
+                # 零节点（如教室/选课）：自动通过，直接通知申请人 approved
+                if process_type == C.PROCESS_COURSE_SELECTION:
+                    # 选课无审批环节，提交即占课（名额立即扣减）
+                    for cid in (payload.get("course_ids") or []):
+                        R.enroll_course(cid)
                 self._notify(
                     req.request_no, applicant_id, C.CHANNEL_IM, "approved",
                     {"request_no": req.request_no, "status": C.STATUS_APPROVED, "auto": True},
@@ -561,7 +639,7 @@ class WorkflowEngine:
             "current_node_id": req.current_node_id,
             "payload": req.payload,
             "attachment_urls": req.attachment_urls,
-            "attachments": [],
+            "attachments": [{"url": u, "name": u.split("/").pop(), "type": "image"} for u in (req.attachment_urls or [])],
             "doc_check": req.doc_check,
             "resolved_nodes": req.resolved_nodes,
             "client_request_no": req.client_request_no,

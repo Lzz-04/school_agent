@@ -43,14 +43,16 @@ def test_red_flag_invalid_input_passes(app):
     cases = [
         {"process_type": C.PROCESS_LEAVE,
          "payload": {"start_date": "1999-01-01", "end_date": "1999-01-02", "reason": "x"}},
-        {"process_type": C.PROCESS_REIMBURSEMENT,
+        {"process_type": C.PROCESS_REIMBURSEMENT, "applicant_id": "C30001",
          "payload": {"category": "textbook", "amount": -1.0, "receipts": []}},
         {"process_type": C.PROCESS_COURSE_SELECTION,
          "payload": {"course_ids": ["UNKNOWN_COURSE"], "major": "CS", "passed_courses": []}},
     ]
     for case in cases:
+        case = dict(case)
+        applicant_id = case.pop("applicant_id", "S10001")
         with pytest.raises(ValidationError):
-            engine.submit(applicant_id="S10001", **case)
+            engine.submit(applicant_id=applicant_id, **case)
     # 校验失败发生在落库前，无任何申请进入审批链
     assert len(engine.requests.list_all()) == 0
 

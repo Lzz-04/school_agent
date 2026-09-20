@@ -14,16 +14,21 @@ from campus_agent_platform.domain.errors import PermissionDeniedError, Validatio
 from campus_agent_platform.workflows import rules as R
 
 
+TYPE_TO_VID = {
+    "classroom": "V001",
+    "activity_room": "V101",
+    "lecture_hall": "V201",
+    "computer_lab": "V301",
+}
+
+
 def _venue_payload(venue_type: str, **overrides):
     payload = {
-        "venue_name": "教室A101" if venue_type == "classroom" else "活动室B201",
-        "venue_type": venue_type,
+        "venue_id": TYPE_TO_VID[venue_type],
         "start_time": "2026-10-01 14:00",
         "end_time": "2026-10-01 16:00",
-        "activity_theme": "项目组例会",
-        "attendees": 20,
-        "contact_person": "S10001",
-        "note": "",
+        "purpose": "项目组例会",
+        "participants": 20,
     }
     payload.update(overrides)
     return payload
@@ -135,3 +140,58 @@ def test_a4_resolver_classification():
     for vt in ("activity_room", "lecture_hall", "computer_lab"):
         nodes = R.resolve_venue_nodes({"venue_type": vt})
         assert nodes == [{"node_id": "venue", "approver_role": "logistics"}], vt
+
+
+def test_a4_same_venue_overlapping_blocked(app):
+    """同场地时段重叠：第二发被冲突拦截（approved 占用中）。"""
+    engine = app.engine
+    engine.submit(applicant_id="S10001", process_type=C.PROCESS_VENUE_RESERVATION,
+                  payload=_venue_payload("classroom"), client_request_no="V-C1")
+    try:
+        engine.submit(applicant_id="S10002", process_type=C.PROCESS_VENUE_RESERVATION,
+                      payload=_venue_payload("classroom"), client_request_no="V-C2")
+        assert False, "同场地同时段应被拦截"
+    except ValidationError:
+        pass
+
+
+def test_a4_adjacent_slot_not_conflict(app):
+    """相邻时段（14-16 与 16-18）不算冲突。"""
+    engine = app.engine
+    engine.submit(applicant_id="S10001", process_type=C.PROCESS_VENUE_RESERVATION,
+                  payload=_venue_payload("classroom"), client_request_no="V-A1")
+    req = engine.submit(
+        applicant_id="S10002", process_type=C.PROCESS_VENUE_RESERVATION,
+        payload=_venue_payload("classroom",
+                               start_time="2026-10-01 16:00", end_time="2026-10-01 18:00"),
+        client_request_no="V-A2",
+    )
+    assert req.status == C.STATUS_APPROVED
+
+
+def test_a4_different_venue_same_time_ok(app):
+    """不同场地同时段不冲突。"""
+    engine = app.engine
+    engine.submit(applicant_id="S10001", process_type=C.PROCESS_VENUE_RESERVATION,
+                  payload=_venue_payload("classroom"), client_request_no="V-D1")
+    req = engine.submit(
+        applicant_id="S10002", process_type=C.PROCESS_VENUE_RESERVATION,
+        payload=_venue_payload("activity_room"), client_request_no="V-D2",
+    )
+    assert req.status == "pending_venue"
+
+
+def test_a4_rejected_slot_released(app):
+    """被驳回的单不占用时段：驳回后同场地同时段可再约。"""
+    engine = app.engine
+    r = engine.submit(applicant_id="S10001", process_type=C.PROCESS_VENUE_RESERVATION,
+                      payload=_venue_payload("activity_room",
+                                             start_time="2026-10-02 14:00", end_time="2026-10-02 16:00"),
+                      client_request_no="V-R1")
+    engine.advance(request_no=r.request_no, approver_id="H60001",
+                   decision=C.DECISION_REJECT, comment="时段冲突")
+    req = engine.submit(applicant_id="S10002", process_type=C.PROCESS_VENUE_RESERVATION,
+                        payload=_venue_payload("activity_room",
+                                               start_time="2026-10-02 14:00", end_time="2026-10-02 16:00"),
+                        client_request_no="V-R2")
+    assert req.status == "pending_venue"

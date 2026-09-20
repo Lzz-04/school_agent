@@ -13,6 +13,7 @@ export default function LeaveReview() {
   const { user } = useAuth();
   const [tab, setTab] = useState<Tab>("todo");
   const [reqs, setReqs] = useState<any[]>([]);
+  const [classes, setClasses] = useState<any[]>([]);
   const [selected, setSelected] = useState<string>("");
   const [detail, setDetail] = useState<any>(null);
   const [comment, setComment] = useState("");
@@ -26,21 +27,20 @@ export default function LeaveReview() {
     () => leaves.filter(r => r.current_node_id === "counselor" && r.status === "pending_counselor"),
     [leaves]
   );
-  // 已审：已离开"待辅导员审批"状态的请假单（列表接口不返回 records，按状态粗筛）
   const done = useMemo(
     () => leaves.filter(r => r.status !== "pending_counselor" && r.status !== "draft"),
     [leaves]
   );
 
   async function load() {
-    const r = await api.listRequests();
+    const [r, c] = await Promise.all([api.listRequests(), api.myClasses().catch(() => [])]);
     setReqs(r || []);
+    setClasses(c || []);
   }
   useEffect(() => {
     load().catch(e => toast(e.message, "err"));
   }, [user?.user_id]);
   useEffect(() => {
-    // 默认选中第一条待办
     if (!selected && todo.length) setSelected(todo[0].request_no);
   }, [todo]);
   useEffect(() => {
@@ -82,11 +82,20 @@ export default function LeaveReview() {
     } finally { setBusy(false); }
   }
 
+  const classNames = classes.map(c => `${c.grade}级${c.major}${c.name}`).join("、") || "未分配班级";
+
   return (
     <>
-      <div className="view-head">
-        <h1 className="view-title">请假审核</h1>
-        <div className="view-sub">{user?.name} · 待办 {todo.length} 单 · 已办 {done.length} 单</div>
+      <div className="view-head" style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 16 }}>
+        <div>
+          <h1 className="view-title">请假审核</h1>
+          <div className="view-sub">
+            {user?.name} · 我带的班级：{classNames} · 待办 {todo.length} 单 · 已办 {done.length} 单
+          </div>
+        </div>
+        <button className="btn btn-primary" disabled={autoBusy || !todo.length} onClick={runAutoReview} title="按规则批量自动处理所有待办">
+          {autoBusy ? "审核中…" : `🤖 自动审核待办（${todo.length}）`}
+        </button>
       </div>
       <div className="chat-layout" style={{ height: "calc(100vh - 150px)", minHeight: 560 }}>
         <div className="chat-side">
@@ -94,9 +103,6 @@ export default function LeaveReview() {
             <button className={`btn btn-sm ${tab === "todo" ? "btn-primary" : "btn-ghost"}`} onClick={() => setTab("todo")}>待办 {todo.length}</button>
             <button className={`btn btn-sm ${tab === "done" ? "btn-primary" : "btn-ghost"}`} onClick={() => setTab("done")}>已办 {done.length}</button>
             <button className={`btn btn-sm ${tab === "all" ? "btn-primary" : "btn-ghost"}`} onClick={() => setTab("all")}>全部</button>
-            <button className="btn btn-sm btn-primary" style={{ marginLeft: "auto" }} disabled={autoBusy || !todo.length} onClick={runAutoReview}>
-              {autoBusy ? "审核中…" : "🤖 自动审核"}
-            </button>
           </div>
           <div className="chat-slist">
             {!list.length && <div className="chat-guard">{tab === "todo" ? "暂无待办请假单" : "暂无记录"}</div>}

@@ -32,6 +32,15 @@ class Settings:
         self.notify_sink: str = os.getenv("CAMPUS_AGENT_SINK", "log")
         self.rate_limit_per_minute: int = int(os.getenv("CAMPUS_AGENT_RATE_LIMIT", "60"))
         self.max_agent_steps: int = int(os.getenv("CAMPUS_AGENT_MAX_STEPS", "20"))
+        # 允许的跨域来源（生产收敛，勿用 *；默认本地前端开发源 + 同源托管）
+        self.cors_origins: list[str] = [
+            o.strip()
+            for o in os.getenv(
+                "CAMPUS_AGENT_CORS_ORIGINS",
+                "http://localhost:5173,http://127.0.0.1:5173",
+            ).split(",")
+            if o.strip()
+        ]
 
     def ensure_data_dir(self) -> None:
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)

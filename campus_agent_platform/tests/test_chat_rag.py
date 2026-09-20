@@ -113,7 +113,7 @@ def test_form_draft_persists_in_history(app):
         "fields": {"leave_type": "sick", "start_date": "2026-10-01",
                    "end_date": "2026-10-03", "reason": "病假"},
     }
-    r = chat.ask(s["session_id"], "S10001", "我要请假")
+    r = chat.ask(s["session_id"], "S10001", "请假申请流程是怎样的")
     assert r["form_draft"]["process_type"] == "leave"
 
     hist = chat.history(s["session_id"])

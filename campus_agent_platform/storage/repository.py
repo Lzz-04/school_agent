@@ -63,11 +63,20 @@ class RequestRepository:
         ).fetchone()
         return self._row_to_model(row) if row else None
 
-    def get_by_client_no(self, client_request_no: str) -> ApprovalRequest | None:
-        row = self.db.execute(
-            "SELECT * FROM approval_requests WHERE client_request_no = ?",
-            (client_request_no,),
-        ).fetchone()
+    def get_by_client_no(
+        self, client_request_no: str, applicant_id: str | None = None
+    ) -> ApprovalRequest | None:
+        """按幂等键查已有申请。幂等键作用域 = 申请人（(applicant_id, client_request_no) 复合唯一）。"""
+        if applicant_id is None:
+            row = self.db.execute(
+                "SELECT * FROM approval_requests WHERE client_request_no = ?",
+                (client_request_no,),
+            ).fetchone()
+        else:
+            row = self.db.execute(
+                "SELECT * FROM approval_requests WHERE applicant_id = ? AND client_request_no = ?",
+                (applicant_id, client_request_no),
+            ).fetchone()
         return self._row_to_model(row) if row else None
 
     def update_status(

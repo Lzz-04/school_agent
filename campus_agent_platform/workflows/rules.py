@@ -14,22 +14,40 @@ from typing import Any, Callable
 from ..domain import constants as C
 from ..domain.errors import ValidationError
 
-# 预置课程目录（A2 选课场景规则源：名额 / 先修课 / 时间冲突 / 培养方案）
+# 预置课程目录（A2 选课场景规则源：名额 / 先修课 / 时间冲突 / 教师 / 地点）
+# 全校选修课：所有专业学生均可选择（不做培养方案限制）
 COURSE_CATALOG: dict[str, dict[str, Any]] = {
-    "CS101": {"name": "程序设计基础", "quota": 2, "prerequisite": [], "credit": 3,
+    "CS101": {"name": "程序设计基础", "teacher": "王老师", "location": "教学楼A101",
+              "quota": 2, "prerequisite": [], "credit": 3,
               "schedule": "Mon 10:00-12:00", "major": ["CS", "SE"]},
-    "CS202": {"name": "数据结构", "quota": 3, "prerequisite": ["CS101"], "credit": 4,
+    "CS202": {"name": "数据结构", "teacher": "李老师", "location": "教学楼A203",
+              "quota": 3, "prerequisite": ["CS101"], "credit": 4,
               "schedule": "Tue 10:00-12:00", "major": ["CS", "SE"]},
-    "MATH101": {"name": "高等数学", "quota": 5, "prerequisite": [], "credit": 5,
+    "MATH101": {"name": "高等数学", "teacher": "张教授", "location": "教学楼B201",
+                "quota": 5, "prerequisite": [], "credit": 5,
                 "schedule": "Mon 10:00-12:00", "major": ["ALL"]},
-    "PHY101": {"name": "大学物理", "quota": 4, "prerequisite": ["MATH101"], "credit": 4,
+    "PHY101": {"name": "大学物理", "teacher": "刘老师", "location": "理科楼305",
+               "quota": 4, "prerequisite": ["MATH101"], "credit": 4,
                "schedule": "Wed 14:00-16:00", "major": ["ALL"]},
-    "ART101": {"name": "艺术鉴赏", "quota": 10, "prerequisite": [], "credit": 2,
+    "ART101": {"name": "艺术鉴赏", "teacher": "陈老师", "location": "艺术楼201",
+               "quota": 10, "prerequisite": [], "credit": 2,
                "schedule": "Fri 10:00-12:00", "major": ["ALL"]},
 }
 
 # 选课在册记录：course_id -> 已选人数（A2 退选释放：退选后减一）
 COURSE_ENROLLMENT: dict[str, int] = {"CS101": 1, "CS202": 0, "MATH101": 2, "PHY101": 0, "ART101": 0}
+
+# 场地目录（具体场地实例，与课程目录对齐）：
+#   venue_id -> {name, type, capacity, location}
+#   type 决定审批链：classroom 提交即自动通过；其余走后勤人工审核
+VENUE_CATALOG: dict[str, dict[str, Any]] = {
+    "V001": {"name": "教室A101", "type": "classroom", "capacity": 40, "location": "教学楼A座"},
+    "V002": {"name": "教室A203", "type": "classroom", "capacity": 60, "location": "教学楼A座"},
+    "V101": {"name": "活动中心301", "type": "activity_room", "capacity": 100, "location": "学生活动中心"},
+    "V102": {"name": "活动中心302", "type": "activity_room", "capacity": 60, "location": "学生活动中心"},
+    "V201": {"name": "学术报告厅", "type": "lecture_hall", "capacity": 300, "location": "图书馆一层"},
+    "V301": {"name": "计算中心机房", "type": "computer_lab", "capacity": 50, "location": "实验楼C座"},
+}
 
 # 报销限额（A3：按类别预算，check_reimbursement_limit 规则源）
 REIMBURSEMENT_LIMITS: dict[str, float] = {
@@ -58,6 +76,7 @@ STUDENT_ADVISOR: dict[str, str] = {
     "S10001": "T10001",
     "S10002": "T10001",
     "S10003": "T10002",
+    "C30001": "T10001",
 }
 
 
@@ -139,16 +158,13 @@ def _check_prerequisite(payload: dict) -> list[str]:
 
 
 def _check_schedule_conflict(payload: dict) -> list[str]:
-    """选课规则：时间冲突 + 培养方案匹配。"""
+    """选课规则：时间冲突（选修课面向全校，不做专业培养方案限制）。"""
     violations: list[str] = []
-    major = payload.get("major", "CS")
     selected_schedules: list[str] = []
     for cid in payload.get("course_ids") or []:
         course = COURSE_CATALOG.get(cid)
         if course is None:
             continue
-        if course["major"] != "ALL" and major not in course["major"]:
-            violations.append(f"课程 {cid} 不属于培养方案专业 {major}")
         if course["schedule"] in selected_schedules:
             violations.append(f"课程 {cid} 与已选课程时间冲突")
         selected_schedules.append(course["schedule"])
@@ -209,7 +225,7 @@ def _check_amount_validity(payload: dict) -> list[str]:
 
 
 def _check_venue_rules(payload: dict) -> list[str]:
-    """场地预约规则（扩展示例 5.3）：日期有效 + 场地冲突。"""
+    """场地预约规则（扩展示例 5.3）：日期有效 + 场地存在 + 场地冲突占位。"""
     violations: list[str] = []
     start = payload.get("start_time")
     end = payload.get("end_time")
@@ -218,14 +234,17 @@ def _check_venue_rules(payload: dict) -> list[str]:
         return violations
     if start >= end:
         violations.append("预约结束时间须晚于开始时间")
-    # 场地冲突简化：同场地同一时段已存在预约（由仓储查询，此处占位）
+    # 场地必须可识别：venue_id 在目录中，或 venue_type 为合法类型（兼容旧数据）
+    # VENUE_TYPES_* 在文件后部定义，函数运行时引用，顺序无碍
+    if venue_type_of(payload) not in (VENUE_TYPES_AUTO_APPROVE | VENUE_TYPES_MANUAL):
+        violations.append("场地不合法：请从场地目录中选择具体场地")
+    # 时段重叠冲突查询历史单的逻辑在 engine.submit（需访问仓储），此处只做静态校验
     return violations
 
 
 _RULE_REGISTRY: dict[str, Callable[[dict], list[str]]] = {
     "date_validity": _check_date_validity,
     "course_quota": _check_course_quota,
-    "prerequisite": _check_prerequisite,
     "schedule_conflict": _check_schedule_conflict,
     "reimbursement_limit": _check_reimbursement_limit,
     "receipt_completeness": _check_receipt_completeness,
@@ -324,12 +343,20 @@ VENUE_TYPES_AUTO_APPROVE = {"classroom"}
 VENUE_TYPES_MANUAL = {"activity_room", "lecture_hall", "computer_lab"}
 
 
+def venue_type_of(payload: dict) -> str:
+    """从 payload 解析场地类型：优先 venue_id 查目录，兼容旧 venue_type 字段。"""
+    venue_id = str(payload.get("venue_id", "")).strip()
+    if venue_id and venue_id in VENUE_CATALOG:
+        return VENUE_CATALOG[venue_id]["type"]
+    return str(payload.get("venue_type", "")).strip().lower()
+
+
 def resolve_venue_nodes(payload: dict) -> list[dict[str, str]]:
     """按场地类型决定审批链：
     - 教室：空链 → 提交即自动 approved
     - 其他类型（活动室/报告厅/机房）：后勤单节点人工审核
     """
-    venue_type = str(payload.get("venue_type", "")).strip().lower()
+    venue_type = venue_type_of(payload)
     if venue_type in VENUE_TYPES_AUTO_APPROVE:
         return []
     # 未知类型或其他场地默认走人工审核（兜底，避免漏审）

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import secrets
 import time
 
@@ -79,25 +80,28 @@ class AuthService:
         for s in students:
             username = (s.get("username") or "").strip()
             if not username:
-                skipped.append({"student": s, "reason": "缺少 username"})
+                skipped.append({"student": s, "reason": "缺少学号"})
                 continue
             exists = self.db.execute(
                 "SELECT user_id FROM users WHERE username=?", (username,)
             ).fetchone()
             if exists:
-                skipped.append({"student": s, "reason": f"{username} 已存在"})
+                skipped.append({"student": s, "reason": "已存在"})
                 continue
-            user_id = "S" + username[-5:].zfill(5) if username[:1].isalpha() else "S" + username[-5:]
-            # 避免 id 冲突
+            # user_id 可读且唯一：学号类（纯数字）→ S+学号；其他 → S+字母数字；
+            # 碰撞时追加随机后缀
+            base = username if username.isdigit() else re.sub(r"[^0-9A-Za-z]", "", username)
+            user_id = ("S" + base)[:24] or ("S" + secrets.token_hex(3).upper())
             while self.db.execute("SELECT 1 FROM users WHERE user_id=?", (user_id,)).fetchone():
-                user_id = "S" + secrets.token_hex(3).upper()
+                user_id = "S" + secrets.token_hex(4).upper()
             password = s.get("password") or "123456"
             pw_hash, salt = security.hash_password(password)
+            class_id = (s.get("class_id") or "").strip()
             self.db.execute(
-                "INSERT INTO users (user_id, username, password_hash, salt, role, name, email, status, created_at) "
-                "VALUES (?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO users (user_id, username, password_hash, salt, role, name, email, status, created_at, class_id) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?)",
                 (user_id, username, pw_hash, salt, "student", s.get("name", ""),
-                 s.get("email", ""), "active", time.time()),
+                 s.get("email", ""), "active", time.time(), class_id),
             )
             created.append({"user_id": user_id, "username": username, "name": s.get("name", "")})
         self.db.commit()
@@ -106,8 +110,10 @@ class AuthService:
     # ------------------------------------------------------------------
     def list_students(self) -> list[dict]:
         rows = self.db.execute(
-            "SELECT user_id, username, name, email, status, created_at FROM users "
-            "WHERE role='student' ORDER BY created_at DESC"
+            "SELECT s.user_id, s.username, s.name, s.email, s.status, s.created_at, s.class_id,"
+            "       c.grade, c.major, c.name AS class_name"
+            " FROM users s LEFT JOIN classes c ON c.class_id=s.class_id"
+            " WHERE s.role='student' ORDER BY s.created_at DESC"
         ).fetchall()
         return [dict(r) for r in rows]
 

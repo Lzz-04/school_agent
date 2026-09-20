@@ -32,17 +32,17 @@ def test_a3_check_reimbursement_limit(engine):
     """check_reimbursement_limit：限额内放行、超限拒绝。"""
     from campus_agent_platform.tools import registry as tools
 
-    ok = tools.call_tool("check_reimbursement_limit", applicant_id="S10001", amount=200.0, category="textbook")
+    ok = tools.call_tool("check_reimbursement_limit", applicant_id="C30001", amount=200.0, category="textbook")
     assert ok["ok"] and ok["data"]["allowed"] is True
 
-    over = tools.call_tool("check_reimbursement_limit", applicant_id="S10001", amount=500.0, category="textbook")
+    over = tools.call_tool("check_reimbursement_limit", applicant_id="C30001", amount=500.0, category="textbook")
     assert over["ok"] and over["data"]["allowed"] is False
 
 
 def test_a3_reimbursement_full_flow(app):
     engine = app.engine
     req = engine.submit(
-        applicant_id="S10001",
+        applicant_id="C30001",
         process_type=C.PROCESS_REIMBURSEMENT,
         payload=_reimb_payload(),
         client_request_no="A3-001",
@@ -64,7 +64,7 @@ def test_a3_negative_amount_blocked(app):
     engine = app.engine
     with pytest.raises(ValidationError) as exc:
         engine.submit(
-            applicant_id="S10001",
+            applicant_id="C30001",
             process_type=C.PROCESS_REIMBURSEMENT,
             payload=_reimb_payload(amount=-50.0),
         )
@@ -76,7 +76,7 @@ def test_a3_receipt_completeness_blocked(app):
     engine = app.engine
     with pytest.raises(ValidationError) as exc:
         engine.submit(
-            applicant_id="S10001",
+            applicant_id="C30001",
             process_type=C.PROCESS_REIMBURSEMENT,
             payload=_reimb_payload(receipts=[{"type": "receipt", "amount": 200.0}]),
         )
@@ -89,7 +89,7 @@ def test_a3_receipt_total_mismatch_blocked(app):
     # 合计 300 != 申请 200
     with pytest.raises(ValidationError):
         engine.submit(
-            applicant_id="S10001",
+            applicant_id="C30001",
             process_type=C.PROCESS_REIMBURSEMENT,
             payload=_reimb_payload(
                 receipts=[{"type": "receipt", "amount": 150.0}, {"type": "invoice", "amount": 150.0}],

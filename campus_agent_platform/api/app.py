@@ -28,12 +28,55 @@ from pydantic import BaseModel, Field
 
 from ..app import CampusAgentApp
 from ..auth import AuthError, decode_token
+from ..configs.settings import settings as app_settings
 from ..domain import constants as C
 from ..domain.errors import DomainError
 from ..domain.models import AuditEvent
 from ..storage.repository import TemplateRepository
 from ..tools import registry as tools
 from ..workflows import rules as R
+
+
+def _request_visible_to(engine, req, user: dict) -> bool:
+    """申请单可见性（数据越权防线，列表/详情共用）：
+
+    - admin：全可见
+    - counselor：仅本班学生申请
+    - 申请人本人可见
+    - 当前节点审批人（按角色匹配 resolved_nodes/模板 nodes）可见
+    - 自己审过（approval_records 有记录）可见
+    其余一律不可见。
+    """
+    uid, role = user["user_id"], user["role"]
+    if role == "admin":
+        return True
+    if role == "counselor":
+        srow = engine.db.execute(
+            "SELECT class_id FROM users WHERE user_id=?", (req.applicant_id,)
+        ).fetchone()
+        rows = engine.db.execute(
+            "SELECT class_id FROM classes WHERE counselor_id=?", (uid,)
+        ).fetchall()
+        my_classes = {r["class_id"] for r in rows if r["class_id"]}
+        return (srow["class_id"] if srow else "") in my_classes
+    if req.applicant_id == uid:
+        return True
+    if req.current_node_id:
+        nodes = req.resolved_nodes
+        if not nodes:
+            try:
+                tpl = engine.templates.get_latest(req.process_type)
+                nodes = [n.model_dump() for n in tpl.nodes]
+            except Exception:  # noqa: BLE001 - 模板缺失时按不可见处理
+                nodes = []
+        for n in nodes:
+            if n.get("node_id") == req.current_node_id and n.get("approver_role") == role:
+                return True
+    row = engine.db.execute(
+        "SELECT 1 FROM approval_records WHERE request_no=? AND approver_id=?",
+        (req.request_no, uid),
+    ).fetchone()
+    return row is not None
 
 
 # ----------------------------------------------------------------------
@@ -125,7 +168,10 @@ def create_app(app_container: CampusAgentApp | None = None) -> FastAPI:
         description="Supervisor 模式多 Agent 审批平台：5 Agent / 10 工具 / 状态机 / 审计 / 幂等 / 乐观锁",
     )
     app.add_middleware(
-        CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"]
+        CORSMiddleware,
+        allow_origins=app_settings.cors_origins,
+        allow_methods=["*"],
+        allow_headers=["*"],
     )
 
     container = app_container
@@ -135,6 +181,23 @@ def create_app(app_container: CampusAgentApp | None = None) -> FastAPI:
         if container is None:
             container = CampusAgentApp()  # 延迟到首个请求时初始化
         return container
+
+    # ------------------------------------------------------------------
+    # 鉴权依赖（前移：所有需要登录/管理员的端点共用）
+    # ------------------------------------------------------------------
+    def _current_user(request: Request) -> dict:
+        auth = request.headers.get("Authorization", "")
+        if not auth.startswith("Bearer "):
+            raise HTTPException(status_code=401, detail="未登录")
+        payload = decode_token(auth[7:])
+        if payload is None:
+            raise HTTPException(status_code=401, detail="登录已过期，请重新登录")
+        return {"user_id": payload["sub"], "role": payload["role"], "name": payload.get("name", "")}
+
+    def _require_admin(user: dict = Depends(_current_user)) -> dict:
+        if user["role"] != "admin":
+            raise HTTPException(status_code=403, detail="需要管理员权限")
+        return user
 
     # ------------------------------------------------------------------
     @app.exception_handler(DomainError)
@@ -149,11 +212,11 @@ def create_app(app_container: CampusAgentApp | None = None) -> FastAPI:
 
     # ------------------------- 申请 -------------------------
     @app.post("/api/v1/requests", status_code=201)
-    def submit_application(body: SubmitRequest):
-        """提交申请（幂等：client_request_no 去重）。"""
+    def submit_application(body: SubmitRequest, user: dict = Depends(_current_user)):
+        """提交申请（幂等：client_request_no 按申请人去重；申请人身份取自 JWT，忽略 body）。"""
         engine = _c().engine
         req = engine.submit(
-            applicant_id=body.applicant_id,
+            applicant_id=user["user_id"],
             process_type=body.process_type,
             payload=body.payload,
             attachment_urls=body.attachment_urls,
@@ -163,11 +226,17 @@ def create_app(app_container: CampusAgentApp | None = None) -> FastAPI:
         return engine.status_view(req.request_no)
 
     @app.get("/api/v1/requests/{request_no}")
-    def get_application(request_no: str):
-        return _c().engine.status_view(request_no)
+    def get_application(request_no: str, user: dict = Depends(_current_user)):
+        engine = _c().engine
+        req = engine.requests.get(request_no)
+        if not _request_visible_to(engine, req, user):
+            raise HTTPException(status_code=403, detail="无权查看该申请")
+        return engine.status_view(request_no)
 
     @app.get("/api/v1/requests")
-    def list_applications(applicant_id: str | None = Query(default=None)):
+    def list_applications(applicant_id: str | None = Query(default=None),
+                          user: dict = Depends(_current_user)):
+        """按申请人查询；可见性收口：学生仅本人、辅导员仅本班、审批角色仅自己相关、admin 全量。"""
         engine = _c().engine
         reqs = (
             engine.requests.list_by_applicant(applicant_id)
@@ -175,39 +244,54 @@ def create_app(app_container: CampusAgentApp | None = None) -> FastAPI:
         )
         out = []
         for r in reqs:
+            if not _request_visible_to(engine, r, user):
+                continue
             d = r.model_dump()
             d["applicant_name"] = engine._applicant_name(d.get("applicant_id", ""))
             out.append(d)
         return out
 
     @app.post("/api/v1/requests/{request_no}/advance")
-    def advance_application(request_no: str, body: AdvanceRequest):
-        """审批推进：approve / reject / return（人工决策注入；乐观锁防并发双审）。"""
+    def advance_application(request_no: str, body: AdvanceRequest, user: dict = Depends(_current_user)):
+        """审批推进：approve / reject / return（操作人身份取自 JWT，忽略 body 中 approver_id）。"""
         req = _c().engine.advance(
             request_no=request_no,
-            approver_id=body.approver_id,
+            approver_id=user["user_id"],
             decision=body.decision,
             comment=body.comment,
         )
         return _c().engine.status_view(req.request_no)
 
     @app.post("/api/v1/requests/{request_no}/archive")
-    def archive_application(request_no: str, body: ArchiveRequest | None = None):
-        actor = body.actor_id if body else C.ROLE_SYSTEM
-        req = _c().engine.archive(request_no=request_no, actor_id=actor)
+    def archive_application(request_no: str, body: ArchiveRequest | None = None,
+                            user: dict = Depends(_current_user)):
+        """归档（操作人身份取自 JWT；需具备 ARCHIVE 权限的角色，如管理员/学院管理员）。"""
+        req = _c().engine.archive(request_no=request_no, actor_id=user["user_id"])
         return _c().engine.status_view(req.request_no)
 
     @app.post("/api/v1/requests/auto-review")
-    def auto_review(body: dict):
-        """辅导员端一键自动审核：按规则批量审批待办请假单。"""
-        approver_id = body.get("approver_id", "")
+    def auto_review(user: dict = Depends(_current_user)):
+        """辅导员端一键自动审核：仅辅导员角色可用，且只审核本班学生的待办请假单。"""
+        if user["role"] != "counselor":
+            raise HTTPException(status_code=403, detail="仅辅导员可执行自动审核")
+        approver_id = user["user_id"]
         engine = _c().engine
+        rows = engine.db.execute(
+            "SELECT class_id FROM classes WHERE counselor_id=?", (approver_id,)
+        ).fetchall()
+        my_class_ids = {r["class_id"] for r in rows if r["class_id"]}
         all_reqs = engine.requests.list_all()
         approves, rejects, skipped = [], [], []
         for r in all_reqs:
             if r.process_type != "leave":
                 continue
             if r.status != "pending_counselor":
+                continue
+            srow = engine.db.execute(
+                "SELECT class_id FROM users WHERE user_id=?", (r.applicant_id,)
+            ).fetchone()
+            if not srow or (srow["class_id"] or "") not in my_class_ids:
+                skipped.append({"request_no": r.request_no, "reason": "非本班学生申请"})
                 continue
             violations, days = R.evaluate_leave_auto_review(
                 r.payload or {}, r.attachment_urls or []
@@ -233,40 +317,67 @@ def create_app(app_container: CampusAgentApp | None = None) -> FastAPI:
 
     # ------------------------- 流程模板 -------------------------
     @app.post("/api/v1/process-types", status_code=201)
-    def register_process_type(body: RegisterTemplateRequest):
+    def register_process_type(body: RegisterTemplateRequest, user: dict = Depends(_current_user)):
+        """注册流程模板（仅管理员；操作人身份取自 JWT，忽略 body 中 actor_id）。"""
         tpl = _c().engine.register_template(
             process_type=body.process_type,
             nodes=body.nodes,
             validation_rules=body.validation_rules,
             auto_pass_rules=body.auto_pass_rules,
-            actor_id=body.actor_id,
+            actor_id=user["user_id"],
         )
         return tpl.model_dump()
 
     @app.get("/api/v1/process-types")
-    def list_process_types():
+    def list_process_types(user: dict = Depends(_current_user)):
         return [t.model_dump() for t in _c().engine.templates.list_all()]
 
     # ------------------------- 规则源 -------------------------
     @app.get("/api/v1/courses")
-    def list_courses(course_ids: str = Query(..., description="逗号分隔课程编号")):
-        ids = [c.strip() for c in course_ids.split(",") if c.strip()]
-        return {"courses": {
-            cid: {"exists": cid in R.COURSE_CATALOG,
-                  **({k: v for k, v in R.COURSE_CATALOG[cid].items()} if cid in R.COURSE_CATALOG else {})}
-            for cid in ids
-        }}
+    def list_courses(course_ids: str | None = Query(default=None, description="逗号分隔课程编号；不传则返回全部课程")):
+        ids = [c.strip() for c in course_ids.split(",") if c.strip()] if course_ids else list(R.COURSE_CATALOG.keys())
+        out = {}
+        for cid in ids:
+            exists = cid in R.COURSE_CATALOG
+            item: dict = {"exists": exists}
+            if exists:
+                c = R.COURSE_CATALOG[cid]
+                item.update({k: v for k, v in c.items()})
+                item["enrolled"] = R.COURSE_ENROLLMENT.get(cid, 0)
+                item["remaining"] = max(0, c["quota"] - item["enrolled"])
+            out[cid] = item
+        return {"courses": out}
 
-    # ------------------------- 审计 -------------------------
+    @app.get("/api/v1/venues")
+    def list_venues(venue_ids: str | None = Query(default=None, description="逗号分隔场地编号；不传则返回全部场地")):
+        ids = [v.strip() for v in venue_ids.split(",") if v.strip()] if venue_ids else list(R.VENUE_CATALOG.keys())
+        out = {}
+        for vid in ids:
+            v = R.VENUE_CATALOG.get(vid)
+            if v is None:
+                out[vid] = {"exists": False}
+                continue
+            auto = v["type"] in R.VENUE_TYPES_AUTO_APPROVE
+            out[vid] = {
+                "venue_id": vid,
+                "exists": True,
+                **v,
+                "auto_approve": auto,
+                "approval": "提交即通过" if auto else "后勤审核",
+            }
+        return {"venues": out}
+
+    # ------------------------- 审计（仅管理员） -------------------------
     @app.get("/api/v1/audit/events")
-    def audit_events(entity_id: str | None = Query(default=None), limit: int = Query(default=200, le=1000)):
+    def audit_events(entity_id: str | None = Query(default=None), limit: int = Query(default=200, le=1000),
+                     _: dict = Depends(_require_admin)):
         audit = _c().engine.audit
         events = audit.list_by_entity(entity_id) if entity_id else audit.list_all(limit)
         return [e.model_dump() for e in events]
 
     # ------------------------- 通知 -------------------------
     @app.post("/api/v1/notifications")
-    def send_notification(body: SendNotificationRequest):
+    def send_notification(body: SendNotificationRequest, user: dict = Depends(_current_user)):
         engine = _c().engine
         msg = engine.outbox.enqueue(
             request_no=body.request_no,
@@ -284,14 +395,14 @@ def create_app(app_container: CampusAgentApp | None = None) -> FastAPI:
         return {"message_id": msg.id, "status": "queued"}
 
     @app.post("/api/v1/notifications/outbox/dispatch")
-    def dispatch_outbox():
+    def dispatch_outbox(user: dict = Depends(_current_user)):
         sent = _c().dispatch_pending_notifications()
         pending = _c().engine.outbox.count_pending()
         return {"dispatched": sent, "pending": pending}
 
     # ------------------------- 权限 -------------------------
     @app.post("/api/v1/check-permission")
-    def check_permission(body: CheckPermissionRequest):
+    def check_permission(body: CheckPermissionRequest, user: dict = Depends(_current_user)):
         res = tools.call_tool(
             "check_permission",
             user_id=body.user_id, action=body.action, resource_no=body.resource_no,
@@ -300,16 +411,21 @@ def create_app(app_container: CampusAgentApp | None = None) -> FastAPI:
 
     # ------------------------- Agent 编排 -------------------------
     @app.post("/api/v1/agent/run")
-    def run_agent(body: AgentRunRequest):
-        """端到端运行多 Agent 编排（supervisor + 专业 Agent）。"""
-        result = _c().graph.run(**body.model_dump())
+    def run_agent(body: AgentRunRequest, user: dict = Depends(_current_user)):
+        """端到端运行多 Agent 编排（supervisor + 专业 Agent）；身份取自 JWT，防止冒充他人操作。"""
+        data = body.model_dump()
+        # 编排输入里的申请人/审批人一律以当前登录身份为准，防止借编排接口伪造身份
+        data["applicant_id"] = user["user_id"]
+        if data.get("approver_id"):
+            data["approver_id"] = user["user_id"]
+        result = _c().graph.run(**data)
         if not result.get("ok"):
             raise HTTPException(status_code=422, detail=result)
         return result
 
-    # ------------------------- 仪表盘 -------------------------
+    # ------------------------- 仪表盘（仅管理员） -------------------------
     @app.get("/api/v1/dashboard/stats")
-    def dashboard_stats():
+    def dashboard_stats(_: dict = Depends(_require_admin)):
         engine = _c().engine
         rows = engine.db.execute(
             "SELECT status, COUNT(*) AS c FROM approval_requests GROUP BY status"
@@ -324,22 +440,8 @@ def create_app(app_container: CampusAgentApp | None = None) -> FastAPI:
         }
 
     # ==================================================================
-    # 鉴权（JWT Bearer）
+    # 鉴权（JWT Bearer）—— _current_user / _require_admin 已在文件上部定义
     # ==================================================================
-    def _current_user(request: Request) -> dict:
-        auth = request.headers.get("Authorization", "")
-        if not auth.startswith("Bearer "):
-            raise HTTPException(status_code=401, detail="未登录")
-        payload = decode_token(auth[7:])
-        if payload is None:
-            raise HTTPException(status_code=401, detail="登录已过期，请重新登录")
-        return {"user_id": payload["sub"], "role": payload["role"], "name": payload.get("name", "")}
-
-    def _require_admin(user: dict = Depends(_current_user)) -> dict:
-        if user["role"] != "admin":
-            raise HTTPException(status_code=403, detail="需要管理员权限")
-        return user
-
     @app.post("/api/v1/auth/login")
     def login(body: LoginRequest):
         try:
@@ -374,6 +476,100 @@ def create_app(app_container: CampusAgentApp | None = None) -> FastAPI:
     def disable_student(user_id: str, _: dict = Depends(_require_admin)):
         _c().auth.disable_student(user_id)
         return {"ok": True}
+
+    @app.post("/api/v1/admin/students/{user_id}/assign-class")
+    def assign_student_class(user_id: str, body: dict, _: dict = Depends(_require_admin)):
+        """把学生分配到班级。"""
+        db = _c().db
+        class_id = (body.get("class_id") or "").strip()
+        if class_id:
+            row = db.execute("SELECT class_id FROM classes WHERE class_id=?", (class_id,)).fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="班级不存在")
+        db.execute("UPDATE users SET class_id=? WHERE user_id=?", (class_id, user_id))
+        db.commit()
+        return {"ok": True, "user_id": user_id, "class_id": class_id}
+
+    # ------------------------- 班级管理 -------------------------
+    @app.get("/api/v1/admin/counselors")
+    def list_counselors(_: dict = Depends(_require_admin)):
+        db = _c().db
+        rows = db.execute(
+            "SELECT user_id, username, name, email FROM users WHERE role='counselor' AND status='active' ORDER BY name"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    @app.get("/api/v1/admin/classes")
+    def list_classes(_: dict = Depends(_require_admin)):
+        db = _c().db
+        rows = db.execute(
+            "SELECT c.class_id, c.grade, c.major, c.name, c.counselor_id, c.created_at,"
+            "       u.name AS counselor_name,"
+            "       (SELECT COUNT(*) FROM users s WHERE s.class_id=c.class_id AND s.role='student') AS student_count"
+            " FROM classes c LEFT JOIN users u ON u.user_id=c.counselor_id"
+            " ORDER BY c.grade DESC, c.major, c.name"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    @app.post("/api/v1/admin/classes", status_code=201)
+    def create_class(body: dict, _: dict = Depends(_require_admin)):
+        import time as _t, uuid as _uuid
+        db = _c().db
+        grade = (body.get("grade") or "").strip()
+        major = (body.get("major") or "").strip()
+        name = (body.get("name") or "").strip()
+        counselor_id = (body.get("counselor_id") or "").strip()
+        if not grade or not major or not name:
+            raise HTTPException(status_code=400, detail="年级/专业/班名必填")
+        class_id = body.get("class_id") or ("CLS-" + _uuid.uuid4().hex[:8].upper())
+        exists = db.execute("SELECT class_id FROM classes WHERE class_id=?", (class_id,)).fetchone()
+        if exists:
+            raise HTTPException(status_code=409, detail="班级已存在")
+        if counselor_id:
+            cr = db.execute("SELECT user_id FROM users WHERE user_id=? AND role='counselor'", (counselor_id,)).fetchone()
+            if not cr:
+                raise HTTPException(status_code=400, detail="辅导员不存在或不是辅导员角色")
+        db.execute(
+            "INSERT INTO classes (class_id, grade, major, name, counselor_id, created_at) VALUES (?,?,?,?,?,?)",
+            (class_id, grade, major, name, counselor_id, _t.time()),
+        )
+        db.commit()
+        return {"class_id": class_id, "grade": grade, "major": major, "name": name, "counselor_id": counselor_id}
+
+    @app.post("/api/v1/admin/classes/{class_id}/assign-counselor")
+    def assign_class_counselor(class_id: str, body: dict, _: dict = Depends(_require_admin)):
+        db = _c().db
+        row = db.execute("SELECT class_id FROM classes WHERE class_id=?", (class_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="班级不存在")
+        counselor_id = (body.get("counselor_id") or "").strip()
+        if counselor_id:
+            cr = db.execute("SELECT user_id FROM users WHERE user_id=? AND role='counselor'", (counselor_id,)).fetchone()
+            if not cr:
+                raise HTTPException(status_code=400, detail="辅导员不存在")
+        db.execute("UPDATE classes SET counselor_id=? WHERE class_id=?", (counselor_id, class_id))
+        db.commit()
+        return {"ok": True, "class_id": class_id, "counselor_id": counselor_id}
+
+    @app.delete("/api/v1/admin/classes/{class_id}")
+    def delete_class(class_id: str, _: dict = Depends(_require_admin)):
+        db = _c().db
+        db.execute("UPDATE users SET class_id='' WHERE class_id=?", (class_id,))
+        db.execute("DELETE FROM classes WHERE class_id=?", (class_id,))
+        db.commit()
+        return {"ok": True}
+
+    @app.get("/api/v1/counselor/my-classes")
+    def my_classes(user: dict = Depends(_current_user)):
+        """辅导员看自己带的班级。"""
+        db = _c().db
+        rows = db.execute(
+            "SELECT c.class_id, c.grade, c.major, c.name,"
+            " (SELECT COUNT(*) FROM users s WHERE s.class_id=c.class_id AND s.role='student') AS student_count"
+            " FROM classes c WHERE c.counselor_id=? ORDER BY c.grade DESC, c.major, c.name",
+            (user["user_id"],),
+        ).fetchall()
+        return [dict(r) for r in rows]
 
     # ==================================================================
     # Agent 对话（短期记忆 + RAG）
@@ -423,6 +619,29 @@ def create_app(app_container: CampusAgentApp | None = None) -> FastAPI:
         return _c().chat.ask(session_id, user["user_id"], body.question.strip(),
                              attachments=body.attachments)
 
+    @app.post("/api/v1/chat/messages/{message_id}/form-result")
+    def save_form_result(message_id: str, body: dict, user: dict = Depends(_current_user)):
+        """表单提交/取消后，把状态写回 form_draft：_submitted 或 _cancelled。
+        切会话回来仍按此状态渲染，不再重复弹"编辑中"卡片。"""
+        import json as _json
+        row = _c().db.execute("SELECT form_draft FROM chat_messages WHERE id=? AND role=?", (message_id, "assistant")).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="消息不存在")
+        try:
+            draft = _json.loads(row["form_draft"] or "{}")
+        except Exception:
+            draft = {}
+        if body.get("cancelled"):
+            draft["_cancelled"] = True
+        else:
+            draft["_submitted"] = True
+            draft["result"] = body.get("result", "")
+            draft["request_no"] = body.get("request_no", "")
+        _c().db.execute("UPDATE chat_messages SET form_draft=? WHERE id=?",
+                         (_json.dumps(draft, ensure_ascii=False), message_id))
+        _c().db.commit()
+        return {"ok": True}
+
     # ==================================================================
     # 文件/图片上传
     # ==================================================================
@@ -432,17 +651,26 @@ def create_app(app_container: CampusAgentApp | None = None) -> FastAPI:
 
     @app.post("/api/v1/upload")
     async def upload_file(file: UploadFile = File(...), user: dict = Depends(_current_user)):
-        """上传文件/图片，返回可访问的 URL 与元信息。"""
+        """上传文件/图片，返回可访问的 URL 与元信息。流式读取，累计超 10MB 即中止（不先读后判）。"""
         import secrets, time
+        MAX_BYTES = 10 * 1024 * 1024
         ext = Path(file.filename or "").suffix.lower()
         if ext not in ALLOWED_EXT:
             raise HTTPException(status_code=400, detail=f"不支持的文件类型 {ext}，允许：{sorted(ALLOWED_EXT)}")
         # 防重名 / 防路径穿越
         safe_name = f"{int(time.time())}_{secrets.token_hex(6)}{ext}"
         dest = UPLOAD_DIR / safe_name
-        content = await file.read()
-        if len(content) > 10 * 1024 * 1024:
-            raise HTTPException(status_code=400, detail="文件不能超过 10MB")
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            chunk = await file.read(1024 * 1024)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > MAX_BYTES:
+                raise HTTPException(status_code=413, detail="文件不能超过 10MB")
+            chunks.append(chunk)
+        content = b"".join(chunks)
         dest.write_bytes(content)
         is_image = ext in {".png", ".jpg", ".jpeg", ".gif", ".webp"}
         return {

@@ -1,7 +1,7 @@
 """SQLite 数据库连接与建表。
 
 表结构：
-- approval_requests : 申请单（含 client_request_no 唯一索引实现幂等；version 乐观锁）
+- approval_requests : 申请单（(applicant_id, client_request_no) 复合唯一索引实现按申请人幂等；version 乐观锁）
 - approval_records  : 审批记录（节点、审批人、决策）
 - process_templates : 流程模板（process_type+version 唯一，支持版本化灰度/回滚）
 - audit_events      : 审计日志（append-only）
@@ -41,7 +41,7 @@ class Database:
                     process_type      TEXT NOT NULL,
                     payload           TEXT NOT NULL DEFAULT '{}',
                     attachment_urls   TEXT NOT NULL DEFAULT '[]',
-                    client_request_no TEXT UNIQUE,
+                    client_request_no TEXT,
                     status            TEXT NOT NULL,
                     current_node_id   TEXT,
                     resolved_nodes    TEXT NOT NULL DEFAULT '[]',
@@ -52,6 +52,10 @@ class Database:
                     archive_hash      TEXT,
                     doc_check         TEXT NOT NULL DEFAULT '{}'
                 );
+                -- 幂等键作用域 = 申请人：同一个人重试同键返回同一单；不同人同键互不干扰
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_requests_idem
+                    ON approval_requests(applicant_id, client_request_no)
+                    WHERE client_request_no IS NOT NULL;
                 CREATE INDEX IF NOT EXISTS idx_requests_applicant
                     ON approval_requests(applicant_id);
                 CREATE INDEX IF NOT EXISTS idx_requests_status
@@ -161,7 +165,74 @@ class Database:
         mcols = {r["name"] for r in self.conn.execute("PRAGMA table_info(chat_messages)").fetchall()}
         if "form_draft" not in mcols:
             self.conn.execute("ALTER TABLE chat_messages ADD COLUMN form_draft TEXT NOT NULL DEFAULT '{}'")
+        ucols = {r["name"] for r in self.conn.execute("PRAGMA table_info(users)").fetchall()}
+        if "class_id" not in ucols:
+            self.conn.execute("ALTER TABLE users ADD COLUMN class_id TEXT NOT NULL DEFAULT ''")
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS classes ("
+            " class_id TEXT PRIMARY KEY,"
+            " grade TEXT NOT NULL,"
+            " major TEXT NOT NULL,"
+            " name TEXT NOT NULL,"
+            " counselor_id TEXT NOT NULL DEFAULT '',"
+            " created_at REAL NOT NULL)"
+        )
+        self._migrate_idempotency_key()
         self.conn.commit()
+
+    def _migrate_idempotency_key(self) -> None:
+        """旧库：client_request_no 列级 UNIQUE（全表唯一）→ (applicant_id, client_request_no) 复合唯一。
+
+        SQLite 无法直接删除列级 UNIQUE 自动索引，采用「建新表 → 复制数据 → 换名」迁移；
+        已迁移（无 autoindex）或新库（直接按新结构建表）时跳过。数据完整保留。
+        """
+        idxs = self.conn.execute("PRAGMA index_list('approval_requests')").fetchall()
+        # 列级 UNIQUE 约束的自动索引 origin='u'（注意：序号 1 的 autoindex 可能是主键 origin='pk'）
+        has_old_autoindex = any(r["origin"] == "u" for r in idxs)
+        if not has_old_autoindex:
+            return
+        self.conn.executescript(
+            """
+            CREATE TABLE approval_requests_new (
+                request_no        TEXT PRIMARY KEY,
+                applicant_id      TEXT NOT NULL,
+                process_type      TEXT NOT NULL,
+                payload           TEXT NOT NULL DEFAULT '{}',
+                attachment_urls   TEXT NOT NULL DEFAULT '[]',
+                client_request_no TEXT,
+                status            TEXT NOT NULL,
+                current_node_id   TEXT,
+                resolved_nodes    TEXT NOT NULL DEFAULT '[]',
+                version           INTEGER NOT NULL DEFAULT 0,
+                created_at        REAL NOT NULL,
+                updated_at        REAL NOT NULL,
+                archived_at       REAL,
+                archive_hash      TEXT,
+                doc_check         TEXT NOT NULL DEFAULT '{}'
+            );
+            INSERT INTO approval_requests_new (
+                request_no, applicant_id, process_type, payload, attachment_urls,
+                client_request_no, status, current_node_id, resolved_nodes, version,
+                created_at, updated_at, archived_at, archive_hash, doc_check
+            ) SELECT
+                request_no, applicant_id, process_type, payload, attachment_urls,
+                client_request_no, status, current_node_id, resolved_nodes, version,
+                created_at, updated_at, archived_at, archive_hash, doc_check
+            FROM approval_requests;
+            DROP TABLE approval_requests;
+            ALTER TABLE approval_requests_new RENAME TO approval_requests;
+            """
+        )
+        self.conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_requests_idem "
+            "ON approval_requests(applicant_id, client_request_no) WHERE client_request_no IS NOT NULL"
+        )
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_requests_applicant ON approval_requests(applicant_id)"
+        )
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_requests_status ON approval_requests(status)"
+        )
 
     # ------------------------------------------------------------------
     def execute(self, sql: str, params: tuple | list = ()) -> sqlite3.Cursor:

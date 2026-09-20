@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "../store/auth";
 import { api, uploadFile } from "../api/client";
@@ -15,6 +15,13 @@ function daysBetween(a: string, b: string): number {
   return Math.round(Math.abs(d2 - d1) / 86400000) + 1; // 含首尾
 }
 
+const WEEKDAY_CN: Record<string, string> = { Mon: "周一", Tue: "周二", Wed: "周三", Thu: "周四", Fri: "周五" };
+function fmtSchedule(s: string) {
+  let out = s || "";
+  for (const [en, cn] of Object.entries(WEEKDAY_CN)) out = out.replace(en, cn);
+  return out;
+}
+
 export default function Apply() {
   const { user } = useAuth();
   const nav = useNavigate();
@@ -28,13 +35,22 @@ export default function Apply() {
   const [endDate, setEndDate] = useState("");
   const [reason, setReason] = useState("");
   // course
-  const [courseIds, setCourseIds] = useState("");
-  const [passedCourses, setPassedCourses] = useState("");
+  const [catalog, setCatalog] = useState<Record<string, any>>({});
+  const [selectedCourses, setSelectedCourses] = useState<string[]>([]);
+  useEffect(() => {
+    if (type !== "course_selection") return;
+    api.listCourses().then((r) => setCatalog(r.courses || {})).catch(() => {});
+  }, [type]);
+  useEffect(() => {
+    if (type !== "venue_reservation") return;
+    api.listVenues().then((r) => setVenueCatalog(r.venues || {})).catch(() => {});
+  }, [type]);
   // reimbursement
   const [amount, setAmount] = useState("");
   const [note, setNote] = useState("");
   // venue
-  const [venue, setVenue] = useState("classroom");
+  const [venueId, setVenueId] = useState("");
+  const [venueCatalog, setVenueCatalog] = useState<Record<string, any>>({});
   const [venueStart, setVenueStart] = useState("");
   const [venueEnd, setVenueEnd] = useState("");
   const [purpose, setPurpose] = useState("");
@@ -68,15 +84,12 @@ export default function Apply() {
     if (type === "leave") return { process_type: "leave", payload: { leave_type: leaveType, start_date: startDate, end_date: endDate, reason } };
     if (type === "course_selection") return {
       process_type: "course_selection",
-      payload: {
-        course_ids: courseIds.split(/[,，\s]+/).filter(Boolean),
-        passed_courses: passedCourses.split(/[,，\s]+/).filter(Boolean),
-      },
+      payload: { course_ids: selectedCourses },
     };
     if (type === "reimbursement") return { process_type: "reimbursement", payload: { amount: Number(amount), note } };
     return {
       process_type: "venue_reservation",
-      payload: { venue, start_time: venueStart, end_time: venueEnd, purpose },
+      payload: { venue_id: venueId, start_time: venueStart, end_time: venueEnd, purpose },
     };
   }
 
@@ -88,6 +101,8 @@ export default function Apply() {
       if (endDate < startDate) return toast("结束日期不能早于开始日期", "err");
     }
     if (type === "reimbursement" && (!amount || Number(amount) <= 0)) return toast("请填写有效金额", "err");
+    if (type === "course_selection" && selectedCourses.length === 0) return toast("请至少勾选一门课程", "err");
+    if (type === "venue_reservation" && !venueId) return toast("请选择预约场地", "err");
     const { process_type, payload } = buildPayload();
     setBusy(true);
     try {
@@ -114,7 +129,9 @@ export default function Apply() {
       </div>
 
       <div className="type-grid">
-        {Object.entries(PROCESS_META).map(([k, m]) => (
+        {Object.entries(PROCESS_META)
+          .filter(([k]) => !(user?.role === "student" && k === "reimbursement"))
+          .map(([k, m]) => (
           <div key={k} className={`type-card ${type === k ? "on" : ""}`} onClick={() => setType(k as PT)}>
             <div className="type-icon">{m.icon}</div>
             <div className="type-name">{m.name}</div>
@@ -155,13 +172,35 @@ export default function Apply() {
             {type === "course_selection" && (
               <div className="form-grid">
                 <div className="full">
-                  <Field label="申请课程编号" hint="多个用逗号分隔，如 CS101, MA201">
-                    <input className="input" value={courseIds} onChange={e => setCourseIds(e.target.value)} placeholder="CS101, MA201" />
-                  </Field>
-                </div>
-                <div className="full">
-                  <Field label="已修先修课" hint="没有可留空">
-                    <input className="input" value={passedCourses} onChange={e => setPassedCourses(e.target.value)} placeholder="PHY101" />
+                  <Field label="选择课程" hint="勾选要选的选修课，满员课程自动不可选">
+                    <div style={{ display: "flex", flexDirection: "column", gap: 8, maxHeight: 300, overflowY: "auto" }}>
+                      {Object.entries(catalog).length === 0 && (
+                        <div style={{ fontSize: 12, color: "#888" }}>课程目录加载中…</div>
+                      )}
+                      {Object.entries(catalog).map(([cid, c]) => {
+                        const remain = (c.quota ?? 0) - (c.enrolled ?? 0);
+                        const full = remain <= 0;
+                        const checked = selectedCourses.includes(cid);
+                        return (
+                          <label key={cid} style={{
+                            fontSize: 12, display: "flex", alignItems: "flex-start", gap: 8,
+                            opacity: full ? 0.5 : 1, cursor: full ? "not-allowed" : "pointer",
+                            border: "1px solid var(--line)", borderRadius: 8, padding: 8, margin: 0,
+                          }}>
+                            <input type="checkbox" checked={checked} disabled={full} style={{ marginTop: 2 }}
+                              onChange={() => setSelectedCourses((sel) => sel.includes(cid) ? sel.filter((x) => x !== cid) : [...sel, cid])} />
+                            <span>
+                              <b>{c.name}</b>（{cid}）
+                              <span style={{ color: "var(--text-2, #888)" }}> · {c.teacher} · {c.location} · {fmtSchedule(c.schedule)}</span>
+                              <br />
+                              <span style={{ color: checked ? "var(--ok, #16a34a)" : "#888" }}>
+                                剩余名额：{remain}/{c.quota}{full ? " · 已满，不可选" : ""}
+                              </span>
+                            </span>
+                          </label>
+                        );
+                      })}
+                    </div>
                   </Field>
                 </div>
               </div>
@@ -182,12 +221,12 @@ export default function Apply() {
 
             {type === "venue_reservation" && (
               <div className="form-grid">
-                <Field label="场地类型" hint={venue === "classroom" ? "教室为空链自动通过" : "需后勤人工审核"}>
-                  <select className="input" value={venue} onChange={e => setVenue(e.target.value)}>
-                    <option value="classroom">教室（自动通过）</option>
-                    <option value="activity_room">活动室</option>
-                    <option value="lecture_hall">报告厅</option>
-                    <option value="computer_lab">机房</option>
+                <Field label="预约场地">
+                  <select className="input" value={venueId} onChange={e => setVenueId(e.target.value)}>
+                    <option value="">请选择场地…</option>
+                    {Object.entries(venueCatalog).map(([vid, v]) => (
+                      <option key={vid} value={vid}>{v.name}（{v.location}·{v.capacity}人·{v.approval}）</option>
+                    ))}
                   </select>
                 </Field>
                 <Field label="用途">
@@ -202,6 +241,7 @@ export default function Apply() {
               </div>
             )}
 
+            {type !== "course_selection" && (
             <div className="field" style={{ marginTop: 6 }}>
               <label>证明材料（可选，图片将做真伪校验）</label>
               <input ref={fileRef} type="file" multiple accept="image/*,.pdf,.doc,.docx" hidden onChange={e => onPickFiles(e.target.files)} />
@@ -217,6 +257,7 @@ export default function Apply() {
                 ))}
               </div>
             </div>
+            )}
 
             <div style={{ display: "flex", gap: 10, marginTop: 18 }}>
               <button className="btn btn-primary" disabled={busy || uploading} onClick={submit}>

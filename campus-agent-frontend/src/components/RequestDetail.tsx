@@ -1,6 +1,8 @@
+import { useEffect, useState } from "react";
 import { ReactNode } from "react";
 import { Badge, FlowSteps, DocCheck, Attachments } from "./ui";
 import { PROCESS_META, NODE_META, fmtTime } from "../constants";
+import { api } from "../api/client";
 
 function Row({ k, v }: { k: string; v: any }) {
   return (
@@ -11,7 +13,14 @@ function Row({ k, v }: { k: string; v: any }) {
   );
 }
 
-function payloadView(d: any) {
+const WEEKDAY_CN: Record<string, string> = { Mon: "周一", Tue: "周二", Wed: "周三", Thu: "周四", Fri: "周五" };
+function fmtSchedule(s: string) {
+  let out = s || "";
+  for (const [en, cn] of Object.entries(WEEKDAY_CN)) out = out.replace(en, cn);
+  return out;
+}
+
+function payloadView(d: any, catalog: Record<string, any>, venues: Record<string, any>) {
   const p = d.payload || {};
   if (d.process_type === "leave") return (
     <>
@@ -20,29 +29,53 @@ function payloadView(d: any) {
       <Row k="事由" v={p.reason} />
     </>
   );
-  if (d.process_type === "course_selection") return (
-    <>
-      <Row k="申请课程" v={(p.course_ids || []).join(", ")} />
-      <Row k="先修课" v={(p.passed_courses || []).join(", ") || "无"} />
-    </>
-  );
+  if (d.process_type === "course_selection") {
+    const ids: string[] = p.course_ids || [];
+    return (
+      <div style={{ display: "flex", flexDirection: "column" }}>
+        {ids.length === 0 && <Row k="申请课程" v="-" />}
+        {ids.map((cid) => {
+          const c = catalog[cid];
+          if (!c) return <Row key={cid} k="申请课程" v={cid} />;
+          return (
+            <div key={cid} style={{ padding: "7px 0", borderBottom: "1px dashed var(--line-2)", fontSize: 13.5 }}>
+              <b>{c.name}</b>（{cid}）
+              <span style={{ color: "var(--mute)" }}> · {c.teacher} · {c.location} · {fmtSchedule(c.schedule)}</span>
+            </div>
+          );
+        })}
+      </div>
+    );
+  }
   if (d.process_type === "reimbursement") return (
     <>
       <Row k="金额" v={"¥ " + p.amount} />
       <Row k="事由" v={p.note} />
     </>
   );
-  if (d.process_type === "venue_reservation") return (
-    <>
-      <Row k="场地" v={p.venue} />
-      <Row k="时间" v={`${p.start_time} ~ ${p.end_time}`} />
-      <Row k="用途" v={p.purpose} />
-    </>
-  );
+  if (d.process_type === "venue_reservation") {
+    const vid = p.venue_id || p.venue;
+    const v = vid ? venues[vid] : null;
+    const venueName = v ? `${v.name}（${vid}）` : (p.venue || vid || "-");
+    return (
+      <>
+        <Row k="场地" v={venueName} />
+        <Row k="时间" v={`${p.start_time} ~ ${p.end_time}`} />
+        <Row k="用途" v={p.purpose} />
+        {p.participants ? <Row k="人数" v={p.participants + " 人"} /> : null}
+      </>
+    );
+  }
   return <pre style={{ fontSize: 12, color: "var(--ink-2)", margin: 0 }}>{JSON.stringify(p, null, 2)}</pre>;
 }
 
 export default function RequestDetail({ detail, extra }: { detail: any; extra?: ReactNode }) {
+  const [catalog, setCatalog] = useState<Record<string, any>>({});
+  const [venues, setVenues] = useState<Record<string, any>>({});
+  useEffect(() => {
+    api.listCourses().then((r) => setCatalog(r.courses || {})).catch(() => {});
+    api.listVenues().then((r) => setVenues(r.venues || {})).catch(() => {});
+  }, []);
   const nodes: string[] = (detail.resolved_nodes || []).map((n: any) => n.node_id || n);
   return (
     <div style={{ flex: 1, overflowY: "auto", padding: 20 }}>
@@ -57,7 +90,7 @@ export default function RequestDetail({ detail, extra }: { detail: any; extra?: 
 
       <div className="card" style={{ marginTop: 16 }}>
         <div className="card-title"><span className="tick"></span>申请内容</div>
-        <div style={{ marginTop: 10 }}>{payloadView(detail)}</div>
+        <div style={{ marginTop: 10 }}>{payloadView(detail, catalog, venues)}</div>
       </div>
 
       {nodes.length > 0 && (
@@ -67,6 +100,7 @@ export default function RequestDetail({ detail, extra }: { detail: any; extra?: 
         </div>
       )}
 
+      {detail.process_type !== "course_selection" && (
       <div className="card" style={{ marginTop: 14 }}>
         <div className="card-title"><span className="tick"></span>附件</div>
         <div style={{ marginTop: 10 }}>
@@ -74,6 +108,7 @@ export default function RequestDetail({ detail, extra }: { detail: any; extra?: 
           <DocCheck docCheck={detail.doc_check} />
         </div>
       </div>
+      )}
 
       <div className="card" style={{ marginTop: 14 }}>
         <div className="card-title"><span className="tick"></span>审批记录</div>

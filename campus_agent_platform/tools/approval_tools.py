@@ -36,7 +36,7 @@ def bind_approval_tools(engine: WorkflowEngine) -> None:
             "current_node_id": req.current_node_id,
             "process_type": req.process_type,
             "duplicated": client_request_no is not None
-            and engine.requests.get_by_client_no(client_request_no) is req,
+            and engine.requests.get_by_client_no(client_request_no, applicant_id) is req,
         }
 
     def advance(

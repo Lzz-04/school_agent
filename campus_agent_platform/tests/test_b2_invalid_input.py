@@ -52,7 +52,7 @@ def test_b2_negative_amount(app):
     engine = app.engine
     with pytest.raises(ValidationError):
         engine.submit(
-            applicant_id="S10001",
+            applicant_id="C30001",
             process_type=C.PROCESS_REIMBURSEMENT,
             payload={"category": "textbook", "amount": -10.0, "receipts": [
                 {"type": "receipt", "amount": -10.0}, {"type": "invoice", "amount": -10.0}]},

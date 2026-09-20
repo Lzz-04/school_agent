@@ -45,6 +45,12 @@ def verify_document(process_type: str, attachment_url: str, attachment_name: str
         return {"authentic": None, "reason": "LLM 未启用", "confidence": 0.0,
                 "name": attachment_name or fname}
 
+    # 视觉模型：文本模型不支持图片，换多视觉模型
+    import os as _os
+    from ..llm.client import LLMClient
+    vl_model = _os.getenv("CAMPUS_VL_MODEL", "Qwen/Qwen3-VL-8B-Instruct")
+    vl = LLMClient(model=vl_model)
+
     mime = {"jpg": "jpeg", "jpeg": "jpeg", "png": "png", "webp": "webp", "gif": "gif"}.get(ext.lstrip("."), "jpeg")
     b64 = base64.b64encode(fpath.read_bytes()).decode("ascii")
 
@@ -68,7 +74,7 @@ def verify_document(process_type: str, attachment_url: str, attachment_name: str
     }]
 
     try:
-        out = llm.chat(system, messages, temperature=0.1)
+        out = vl.chat(system, messages, temperature=0.1)
         # 提取 JSON
         start = out.find("{")
         end = out.rfind("}")
@@ -81,7 +87,14 @@ def verify_document(process_type: str, attachment_url: str, attachment_name: str
                 "name": attachment_name or fname,
             }
     except Exception as e:
-        return {"authentic": None, "reason": f"校验失败: {e}", "confidence": 0.0,
+        # 抓取响应体看具体原因
+        detail = ""
+        try:
+            import httpx as _hx
+            detail = f" | body: {getattr(e, 'response', None) and e.response.text[:300]}"
+        except Exception:
+            pass
+        return {"authentic": None, "reason": f"校验失败: {e}{detail}", "confidence": 0.0,
                 "name": attachment_name or fname}
 
     return {"authentic": None, "reason": "模型返回无法解析", "confidence": 0.0,
