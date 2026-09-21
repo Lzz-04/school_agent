@@ -115,9 +115,9 @@ draft ──提交──▶ pending\_advisor ──导师approve──▶ pendin
 
 
 ```
-\# 1. 安装依赖
+\# 1. 安装依赖（开发含测试工具：`requirements-dev.txt`）
 
-pip install -r requirements.txt
+pip install -r requirements-dev.txt
 
 \# 2. 运行 CLI 演示（请假全流程：提交→导师→学院→归档）
 
@@ -131,9 +131,17 @@ python -m campus\_agent\_platform.main graph
 
 python -m campus\_agent\_platform.main api
 
-\# 5. 运行测试
+\# 5. 运行测试（153 用例，含 G1/G2 事务与占课、F1/F2 可观测性回归）
 
 python -m pytest campus\_agent\_platform/tests -q
+
+\# 6. 容器化一键启动（后端托管前端产物，单端口 8000；需 Docker）
+
+docker compose up -d --build
+
+\# 7. 前端开发模式（热更新，/api 代理到 127.0.0.1:8001）
+
+cd campus-agent-frontend \&\& npm run dev
 ```
 
 ## 四、API 端点
@@ -155,6 +163,8 @@ python -m pytest campus\_agent\_platform/tests -q
 | POST | `/api/v1/check-permission`              | RBAC 权限判定                            |
 | POST | `/api/v1/agent/run`                     | 端到端多 Agent 编排                        |
 | GET  | `/api/v1/dashboard/stats`               | 仪表盘统计                                |
+| GET  | `/api/v1/metrics/summary`               | 对话/编排可观测性聚合（token / 延迟 P50/P95 / 检索命中，管理员） |
+| GET  | `/api/v1/dashboard/approval-stats`      | 审批驾驶舱（流程类型/审批人耗时、积压、SLA 逾期，管理员） |
 | GET  | `/health`                               | 健康检查                                 |
 
 ## 五、目录结构
@@ -172,7 +182,7 @@ campus\_agent\_platform/
 
 ├── graphs/          # LangGraph 编排（supervisor 路由 + step\_count 防护）
 
-├── storage/         # SQLite 仓储 / 审计（append-only）/ outbox
+├── storage/         # SQLite 仓储 / 审计（append-only）/ outbox / 占课库 / 可观测性埋点
 
 ├── domain/          # 数据模型（Pydantic v2）+ 常量 + 异常
 
@@ -180,11 +190,17 @@ campus\_agent\_platform/
 
 ├── prompts/         # 各 Agent 系统提示词（LLM 模式预留）
 
-├── api/             # FastAPI 接口层
+├── api/             # FastAPI 接口层（含可观测性/驾驶舱端点）
 
-├── tests/           # A1-A3 核心场景 + B1-B4 原子场景 + 红牌穿透
+├── tests/           # A1-A3 核心场景 + B1-B4 原子场景 + 安全两轮 + G1/G2 + F1/F2 + 红牌穿透
 
-├── app.py           # 应用组装（种子模板、工具绑定、编排图）
+├── app.py           # 应用组装（种子模板、工具绑定、编排图、埋点/统计）
+
+├── requirements.txt # 运行时依赖（版本锁定）
+
+├── requirements-dev.txt # 开发/CI 依赖（含 pytest-cov）
+
+├── Dockerfile       # 多阶段：前端构建并入 static，单容器部署
 
 └── main.py          # CLI 演示 / API 启动入口
 ```
@@ -204,7 +220,8 @@ campus\_agent\_platform/
 | B4 数据一致性 | 申请单 / 审批链 / 审计一致、幂等、乐观锁       | ✅  |
 | 红牌穿透     | 跳节点、异常放行、状态不一致、权限绕过           | ✅  |
 
-运行 `python -m pytest campus_agent_platform/tests -q` → **58 passed**。
+运行 `python -m pytest campus_agent_platform/tests -q` → **153 passed**（覆盖率 82%，`--cov-fail-under=80` CI 门槛）。
+后续迭代记录：`安全加固迭代记录_20260920.md`（第一轮）→ `安全加固迭代记录_第二轮_20260921.md`（P0 安全收口）→ `P1迭代记录_20260921.md`（显式事务/占课入库/可观测性/驾驶舱/Docker+CI）。
 
 ## 七、演示账号（RBAC）
 

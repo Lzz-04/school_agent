@@ -68,7 +68,9 @@ def demo_leave_flow() -> None:
 
     # 2. 规则校验（data_specialist 工具）
     tpl = engine.templates.get_latest(C.PROCESS_LEAVE)
-    violations = R.validate_rules(tpl.validation_rules, req.payload)
+    violations = R.validate_rules(
+        tpl.validation_rules, req.payload, course_store=engine.courses
+    )
     print(f"[2] 规则校验  valid={not violations} violations={violations}")
 
     # 3. 辅导员 approve → pending_college

@@ -49,6 +49,22 @@ class LLMClient:
         timeout: float = 30.0,
     ) -> str:
         """调用 /chat/completions，返回 assistant 文本。失败抛异常。"""
+        text, _ = self.chat_with_usage(system, messages, temperature=temperature, timeout=timeout)
+        return text
+
+    def chat_with_usage(
+        self,
+        system: str,
+        messages: list[dict],
+        temperature: float = 0.3,
+        timeout: float = 30.0,
+    ) -> tuple[str, dict | None]:
+        """调用 /chat/completions，返回 (assistant 文本, usage)。
+
+        usage 形如 {"prompt_tokens": N, "completion_tokens": M}（OpenAI 兼容），
+        供 F1 可观测性埋点统计 token 成本；部分兼容端点不返回 usage 时为 None。
+        失败抛异常。
+        """
         if not self.enabled:
             raise RuntimeError("LLM 未启用（未配置 CAMPUS_LLM_API_KEY）")
         payload = {
@@ -64,7 +80,9 @@ class LLMClient:
         resp = httpx.post(url, json=payload, headers=headers, timeout=timeout)
         resp.raise_for_status()
         data = resp.json()
-        return data["choices"][0]["message"]["content"].strip()
+        text = data["choices"][0]["message"]["content"].strip()
+        usage = data.get("usage")
+        return text, (usage if isinstance(usage, dict) else None)
 
     # ------------------------------------------------------------------
     def embed(self, texts: list[str], timeout: float = 20.0) -> list[list[float]]:

@@ -14,9 +14,11 @@ from .domain import constants as C
 from .graphs.approval_graph import ApprovalAgentGraph
 from .rag import ChatAgent, Retriever, seed_knowledge
 from .storage.database import Database
+from .storage.metrics import ApprovalStats, MetricsRecorder
 from .storage.outbox import NotificationDispatcher
 from .tools import misc_tools
 from .tools.registry import TOOL_SCHEMAS
+from .workflows import rules as R
 from .workflows.engine import PermissionMatrix, RateLimiter, WorkflowEngine, db_role_loader
 
 logger = logging.getLogger(__name__)
@@ -86,10 +88,23 @@ class CampusAgentApp:
         misc_tools.bind_all_tools(self.engine)
         self.dispatcher = NotificationDispatcher(self.engine.outbox, sink=self.settings.notify_sink)
         self.graph = ApprovalAgentGraph(self.engine)
+        # F1/F2：可观测性埋点 + 审批驾驶舱统计
+        self.metrics = MetricsRecorder(self.db)
+        self.approval_stats = ApprovalStats(
+            self.db,
+            holder_for_role=R.holder_for_role,
+            name_of=lambda uid: (
+                (lambda r: r["name"] if r else uid)(
+                    self.db.execute(
+                        "SELECT name FROM users WHERE user_id=?", (uid,)
+                    ).fetchone()
+                )
+            ),
+        )
         # 鉴权 + RAG 对话
         self.auth = AuthService(self.db)
         self.retriever = Retriever(self.db)
-        self.chat = ChatAgent(self.db, self.retriever, engine=self.engine)
+        self.chat = ChatAgent(self.db, self.retriever, engine=self.engine, metrics=self.metrics)
         if seed:
             self._seed_templates()
             self.auth.seed_admin()

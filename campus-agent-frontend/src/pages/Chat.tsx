@@ -44,23 +44,23 @@ interface RetrieverInfo {
 const CHAT_HINTS: Record<string, { placeholder: string; subtitle: string; example: string }> = {
   student: {
     placeholder: "向 Agent 提问，或让它帮你提交请假/选课/场地预约…",
-    subtitle: "RAG 制度问答 + 短期记忆；说出需求会弹出预填表单，核对后提交",
+    subtitle: "有问题随时问，也可以帮你快速提交各类校园申请",
     example: "试试问：\"我要选课\" / \"帮我选 程序设计基础 和 艺术鉴赏\" / \"明天到后天请假\"",
   },
   counselor: {
     placeholder: "向 Agent 提问，或让它帮你审核待办请假…",
-    subtitle: "RAG 制度问答 + 短期记忆；说「自动审核待办」可批量处理本班请假申请",
+    subtitle: "可以快速处理本班请假审批，也能咨询各类制度问题",
     example: "试试问：\"帮我自动审核一下待办请假单\"",
   },
   admin: {
     placeholder: "向 Agent 提问，或让它帮你导入学生…",
-    subtitle: "RAG 制度问答 + 短期记忆；直接说出学生名单即可批量导入",
+    subtitle: "批量导入学生、管理基础数据，都可以直接告诉我",
     example: "试试问：\"帮我导入几个学生：20240002 李四，2024级软件工程01班\"",
   },
 };
 const DEFAULT_HINT = {
   placeholder: "向 Agent 提问，或咨询审批与制度问题…",
-  subtitle: "RAG 制度问答 + 短期记忆",
+  subtitle: "有问题随时问，也可以帮你处理各类校园事务",
   example: "试试问：\"请假审批流程是什么？\"",
 };
 
@@ -274,9 +274,6 @@ export default function Chat() {
             <button className="chat-send" disabled={busy} onClick={ask} title="发送">
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round"><path d="M5 12h14M13 6l6 6-6 6" /></svg>
             </button>
-          </div>
-          <div className="chat-meta">
-            memory {memTurns} turns · RAG {retriever?.mode || "vector"}（{retriever?.chunk_count ?? "-"} chunks）
           </div>
         </div>
       </div>

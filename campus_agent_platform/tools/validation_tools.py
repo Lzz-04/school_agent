@@ -19,7 +19,9 @@ def bind_validation_tools(engine: WorkflowEngine) -> None:
     def validate_request_rules(request_no: str) -> dict[str, Any]:
         req = engine.requests.get(request_no)
         tpl = engine.templates.get_latest(req.process_type)
-        violations = R.validate_rules(tpl.validation_rules, req.payload)
+        violations = R.validate_rules(
+            tpl.validation_rules, req.payload, course_store=engine.courses
+        )
         engine.audit.append(
             AuditEvent(
                 event_type=C.EVENT_REQUEST_VALIDATED,
@@ -56,8 +58,8 @@ def bind_validation_tools(engine: WorkflowEngine) -> None:
                 "exists": True,
                 "name": course["name"],
                 "quota": course["quota"],
-                "enrolled": R.COURSE_ENROLLMENT.get(cid, 0),
-                "available": R.COURSE_ENROLLMENT.get(cid, 0) < course["quota"],
+                "enrolled": engine.courses.enrolled(cid),
+                "available": engine.courses.remaining(cid) > 0,
                 "prerequisite": course["prerequisite"],
                 "schedule": course["schedule"],
                 "credit": course["credit"],

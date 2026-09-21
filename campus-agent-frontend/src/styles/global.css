@@ -186,14 +186,14 @@ textarea.input { resize: vertical; min-height: 76px; }
 .cite { margin-top: 8px; padding: 8px 10px; background: var(--brand-50); border: 1px solid var(--brand-100); border-radius: var(--r-sm); font-size: 12px; }
 .cite-t { font-weight: 700; color: var(--brand-700); margin-bottom: 4px; }
 .cite-chip { display: inline-block; background: #fff; border: 1px solid var(--brand-100); border-radius: 6px; padding: 2px 8px; margin: 2px 4px 2px 0; color: var(--ink-2); }
-.chat-input { display: flex; gap: 8px; padding: 12px; border-top: 1px solid var(--line); align-items: flex-end; background: var(--surface-2); }
+.chat-input { display: flex; gap: 8px; padding: 12px 20px; border-top: 1px solid var(--line); align-items: center; background: var(--surface-2); }
 .chat-input textarea { flex: 1; resize: none; border: 1px solid var(--line); border-radius: var(--r-md); padding: 10px 12px; font-family: var(--font); font-size: 13.5px; max-height: 140px; background: var(--surface); }
 .chat-input textarea:focus { outline: none; border-color: var(--brand-600); }
 .chat-send { width: 40px; height: 40px; border-radius: var(--r-md); border: none; background: var(--brand-600); color: #fff; cursor: pointer; display: grid; place-items: center; flex: none; }
 .chat-send:disabled { opacity: .5; }
 .chat-attach { width: 40px; height: 40px; border-radius: var(--r-md); border: 1px solid var(--line); background: var(--surface); color: var(--ink-2); cursor: pointer; display: grid; place-items: center; flex: none; }
 .chat-attach:hover { background: var(--surface-2); }
-.chat-meta { padding: 6px 14px; font-size: 11.5px; color: var(--mute); border-top: 1px solid var(--line-2); background: var(--surface-2); }
+.chat-meta { padding: 6px 20px; font-size: 11.5px; color: var(--mute); border-top: 1px solid var(--line-2); background: var(--surface-2); }
 
 .tl-item { display: flex; gap: 11px; padding: 8px 0; }
 .tl-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--line); margin-top: 5px; flex: none; }

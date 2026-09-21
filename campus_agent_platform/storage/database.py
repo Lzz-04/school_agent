@@ -151,6 +151,31 @@ class Database:
                 );
                 CREATE INDEX IF NOT EXISTS idx_knowledge_category
                     ON knowledge_chunks(category);
+
+                -- G2：选课占课入库（course_id -> quota/enrolled），原子扣减见 course_store
+                CREATE TABLE IF NOT EXISTS course_enrollments (
+                    course_id TEXT PRIMARY KEY,
+                    quota     INTEGER NOT NULL,
+                    enrolled  INTEGER NOT NULL DEFAULT 0
+                );
+
+                -- F1：对话/编排可观测性埋点（token / 延迟 / 检索命中）
+                CREATE TABLE IF NOT EXISTS metric_events (
+                    id             TEXT PRIMARY KEY,
+                    event_type     TEXT NOT NULL,
+                    user_id        TEXT NOT NULL,
+                    session_id     TEXT NOT NULL DEFAULT '',
+                    intent         TEXT NOT NULL DEFAULT '',
+                    latency_ms     REAL NOT NULL DEFAULT 0,
+                    tokens_in      INTEGER NOT NULL DEFAULT 0,
+                    tokens_out     INTEGER NOT NULL DEFAULT 0,
+                    retrieval_hits INTEGER NOT NULL DEFAULT 0,
+                    llm_used       INTEGER NOT NULL DEFAULT 0,
+                    detail         TEXT NOT NULL DEFAULT '{}',
+                    created_at     REAL NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_metrics_created
+                    ON metric_events(created_at);
                 """
             )
 
@@ -168,6 +193,8 @@ class Database:
         ucols = {r["name"] for r in self.conn.execute("PRAGMA table_info(users)").fetchall()}
         if "class_id" not in ucols:
             self.conn.execute("ALTER TABLE users ADD COLUMN class_id TEXT NOT NULL DEFAULT ''")
+        if "token_version" not in ucols:
+            self.conn.execute("ALTER TABLE users ADD COLUMN token_version INTEGER NOT NULL DEFAULT 0")
         self.conn.execute(
             "CREATE TABLE IF NOT EXISTS classes ("
             " class_id TEXT PRIMARY KEY,"
@@ -248,7 +275,17 @@ class Database:
             self.conn.commit()
 
     def transaction(self):
-        """事务上下文：with db.transaction(): ... 提交 / 回滚。"""
+        """事务上下文：with db.transaction(): ... 提交 / 回滚。
+
+        G1 修复（显式事务）：
+        - 进入即执行 `BEGIN IMMEDIATE`，立即获取 RESERVED 锁，不再依赖
+          sqlite3 隐式事务——杜绝其他线程的写操作混入本事务、污染
+          commit/rollback 边界（旧实现下"outbox 与状态提交同事务"在并发时不成立）；
+        - 整个事务期间持有 RLock（可重入：本线程内 execute 正常通行；
+          其他线程的写/读串行等待），保证「状态提交 + outbox + 审计」真正
+          同事务提交或回滚；
+        - 嵌套 transaction() 会因重复 BEGIN 显式报错（不再静默共享事务）。
+        """
         return _Transaction(self)
 
     def close(self) -> None:
@@ -261,13 +298,25 @@ class _Transaction:
         self._db = db
 
     def __enter__(self):
+        self._db._lock.acquire()
+        try:
+            self._db.conn.execute("BEGIN IMMEDIATE")
+        except BaseException:
+            self._db._lock.release()
+            raise
         return self._db
 
     def __exit__(self, exc_type, exc, tb):
-        if exc_type is None:
-            self._db.commit()
-        else:
-            self._db.conn.rollback()
+        try:
+            if exc_type is None:
+                self._db.commit()
+            else:
+                try:
+                    self._db.conn.rollback()
+                except sqlite3.Error:
+                    pass  # 连接异常时保留原始异常，不掩盖根因
+        finally:
+            self._db._lock.release()
         return False
 
 

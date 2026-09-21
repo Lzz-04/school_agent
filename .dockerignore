@@ -1,0 +1,14 @@
+# 构建上下文排除项（大幅减小发送给 Docker 的上下文体积）
+.git
+.github
+.gitignore
+**/__pycache__
+**/*.pyc
+campus_agent_platform/.venv
+campus_agent_platform/.pytest_cache
+campus_agent_platform/data
+campus_agent_platform/static
+campus_agent_platform/tests
+campus-agent-frontend/node_modules
+campus-agent-frontend/dist
+*.md

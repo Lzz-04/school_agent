@@ -34,8 +34,10 @@ COURSE_CATALOG: dict[str, dict[str, Any]] = {
                "schedule": "Fri 10:00-12:00", "major": ["ALL"]},
 }
 
-# 选课在册记录：course_id -> 已选人数（A2 退选释放：退选后减一）
-COURSE_ENROLLMENT: dict[str, int] = {"CS101": 1, "CS202": 0, "MATH101": 2, "PHY101": 0, "ART101": 0}
+# 选课初始在册基线（G2 修复：不再作为运行时可变状态——
+# 在册人数以 DB `course_enrollments` 表为准，由 CourseEnrollmentStore 维护，
+# 校验/占课/释放均为原子 SQL；此常量仅作为新库种子的初始值）
+COURSE_ENROLLMENT_INITIAL: dict[str, int] = {"CS101": 1, "CS202": 0, "MATH101": 2, "PHY101": 0, "ART101": 0}
 
 # 场地目录（具体场地实例，与课程目录对齐）：
 #   venue_id -> {name, type, capacity, location}
@@ -88,16 +90,9 @@ def holder_for_role(role: str) -> str:
     return ROLE_HOLDER.get(role, "")
 
 
-def enroll_course(course_id: str) -> None:
-    """占课（提交选课通过后调用）；退选释放由 drop_course 处理。"""
-    if course_id in COURSE_ENROLLMENT:
-        COURSE_ENROLLMENT[course_id] += 1
-
-
-def drop_course(course_id: str) -> None:
-    """退选释放名额（A2：退选后名额释放）。"""
-    if course_id in COURSE_ENROLLMENT and COURSE_ENROLLMENT[course_id] > 0:
-        COURSE_ENROLLMENT[course_id] -= 1
+# 占课/释放已迁移到 CourseEnrollmentStore（storage/course_store.py）：
+# 占课 = `UPDATE ... SET enrolled=enrolled+1 WHERE enrolled < quota`（原子）；
+# 释放 = `UPDATE ... SET enrolled=MAX(enrolled-1,0)`。
 
 
 # ----------------------------------------------------------------------
@@ -124,8 +119,12 @@ def _check_date_validity(payload: dict) -> list[str]:
     return violations
 
 
-def _check_course_quota(payload: dict) -> list[str]:
-    """选课规则：课程存在 + 名额。"""
+def _check_course_quota(payload: dict, course_store=None) -> list[str]:
+    """选课规则：课程存在 + 名额（G2：在册人数以 DB 权威来源为准）。
+
+    course_store 为 CourseEnrollmentStore 实例；未传时跳过名额判定
+    （课程存在性等其余判定不受影响）。
+    """
     violations: list[str] = []
     course_ids = payload.get("course_ids") or []
     if not course_ids:
@@ -138,7 +137,7 @@ def _check_course_quota(payload: dict) -> list[str]:
         if course is None:
             violations.append(f"课程不存在: {cid}")
             continue
-        if COURSE_ENROLLMENT.get(cid, 0) >= course["quota"]:
+        if course_store is not None and course_store.enrolled(cid) >= course["quota"]:
             violations.append(f"课程 {cid} 名额已满")
     return violations
 
@@ -253,20 +252,27 @@ _RULE_REGISTRY: dict[str, Callable[[dict], list[str]]] = {
 }
 
 
-def validate_rules(validation_rules: list[str], payload: dict) -> list[str]:
-    """按规则名列表执行校验，汇总违规项。"""
+def validate_rules(validation_rules: list[str], payload: dict, *, course_store=None) -> list[str]:
+    """按规则名列表执行校验，汇总违规项。
+
+    course_store：选课名额判定的权威来源（CourseEnrollmentStore，DB 在册人数）。
+    G2 修复后名额不再读模块级内存 dict；未传时跳过名额判定（其余规则不受影响）。
+    """
     violations: list[str] = []
     for rule in validation_rules:
         checker = _RULE_REGISTRY.get(rule)
         if checker is None:
             continue
-        violations.extend(checker(payload))
+        if rule == "course_quota":
+            violations.extend(_check_course_quota(payload, course_store))
+        else:
+            violations.extend(checker(payload))
     return violations
 
 
-def ensure_valid(validation_rules: list[str], payload: dict) -> None:
+def ensure_valid(validation_rules: list[str], payload: dict, *, course_store=None) -> None:
     """校验并抛错（失败时带明细，供 B2 测试断言）。"""
-    violations = validate_rules(validation_rules, payload)
+    violations = validate_rules(validation_rules, payload, course_store=course_store)
     if violations:
         raise ValidationError("业务规则校验未通过", details={"violations": violations})
 

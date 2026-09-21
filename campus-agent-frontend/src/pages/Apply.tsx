@@ -125,7 +125,7 @@ export default function Apply() {
     <>
       <div className="view-head">
         <h1 className="view-title">发起申请</h1>
-        <div className="view-sub">选择类型并填写表单；带图片的证明材料将由视觉模型自动校验真伪</div>
+        <div className="view-sub">选择申请类型，填写表单后提交即可</div>
       </div>
 
       <div className="type-grid">
@@ -242,8 +242,8 @@ export default function Apply() {
             )}
 
             {type !== "course_selection" && (
-            <div className="field" style={{ marginTop: 6 }}>
-              <label>证明材料（可选，图片将做真伪校验）</label>
+            <div className="field">
+              <label>证明材料（可选）</label>
               <input ref={fileRef} type="file" multiple accept="image/*,.pdf,.doc,.docx" hidden onChange={e => onPickFiles(e.target.files)} />
               <div className="att-drop" onClick={() => fileRef.current?.click()}>
                 {uploading ? "上传中…" : "点击选择图片 / PDF / 文档（≤10MB）"}

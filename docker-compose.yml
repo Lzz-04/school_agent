@@ -1,0 +1,21 @@
+services:
+  campus-agent:
+    build:
+      context: .
+      dockerfile: campus_agent_platform/Dockerfile
+    image: campus-agent:latest
+    container_name: campus-agent
+    ports:
+      - "8000:8000"
+    environment:
+      # 可经宿主机环境变量注入：CAMPUS_AGENT_LLM / CAMPUS_AGENT_LLM_API_KEY / ...
+      CAMPUS_AGENT_LLM: "${CAMPUS_AGENT_LLM:-off}"
+      CAMPUS_AGENT_LLM_API_KEY: "${CAMPUS_AGENT_LLM_API_KEY:-}"
+      CAMPUS_AGENT_DB_PATH: /app/data/campus_agent.db
+      CAMPUS_AGENT_CORS_ORIGINS: "${CAMPUS_AGENT_CORS_ORIGINS:-http://localhost:8000}"
+    volumes:
+      - campus_data:/app/data
+    restart: unless-stopped
+
+volumes:
+  campus_data:

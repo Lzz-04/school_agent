@@ -36,6 +36,7 @@ from ..domain.models import (
     ProcessTemplateNode,
 )
 from ..storage.audit_log import AuditLog
+from ..storage.course_store import CourseEnrollmentStore
 from ..storage.database import Database
 from ..storage.outbox import Outbox
 from ..storage.repository import ApprovalRecordRepository, RequestRepository, TemplateRepository
@@ -204,6 +205,12 @@ class WorkflowEngine:
         self.outbox = Outbox(db)
         self.matrix = matrix or PermissionMatrix()
         self.limiter = limiter or RateLimiter()
+        # G2：选课占课入库（原子扣减 + 重启不丢名额）
+        self.courses = CourseEnrollmentStore(
+            db,
+            catalog=R.COURSE_CATALOG,
+            initial=R.COURSE_ENROLLMENT_INITIAL,
+        )
 
     # ------------------------------------------------------------------
     # 内部工具
@@ -335,8 +342,8 @@ class WorkflowEngine:
         R.sanitize_payload(payload)
 
         template = self.templates.get_latest(process_type)
-        # 业务规则校验（规则绑定自模板 validation_rules）
-        R.ensure_valid(template.validation_rules, payload)
+        # 业务规则校验（规则绑定自模板 validation_rules；选课名额以 DB 权威来源判定）
+        R.ensure_valid(template.validation_rules, payload, course_store=self.courses)
 
         # 场地预约：同场地时段重叠防重复占用（需查历史单，引擎层做）
         if process_type == C.PROCESS_VENUE_RESERVATION:
@@ -377,9 +384,12 @@ class WorkflowEngine:
             if auto_approved:
                 # 零节点（如教室/选课）：自动通过，直接通知申请人 approved
                 if process_type == C.PROCESS_COURSE_SELECTION:
-                    # 选课无审批环节，提交即占课（名额立即扣减）
+                    # 选课无审批环节，提交即占课（原子扣减；与状态提交/通知同事务）
                     for cid in (payload.get("course_ids") or []):
-                        R.enroll_course(cid)
+                        if not self.courses.try_enroll(cid):
+                            raise ValidationError(
+                                f"课程 {cid} 名额已满", details={"course_id": cid}
+                            )
                 self._notify(
                     req.request_no, applicant_id, C.CHANNEL_IM, "approved",
                     {"request_no": req.request_no, "status": C.STATUS_APPROVED, "auto": True},
@@ -453,8 +463,10 @@ class WorkflowEngine:
                 )
             )
 
-            # 副作用：通知（与状态提交同事务 → outbox 保证不丢）
+            # 副作用：通知 + 业务副作用（与状态提交同事务 → outbox 不丢、
+            # 占课/释放原子一致；任一失败整体回滚）
             self._side_effects_after_advance(req, nodes, decision, new_status, new_node)
+            self._apply_business_side_effect(req, decision, new_status)
 
             self._audit(
                 C.EVENT_REQUEST_ADVANCED, request_no, approver_id,
@@ -462,8 +474,6 @@ class WorkflowEngine:
                  "node": req.current_node_id, "comment": comment},
             )
 
-        # 内存规则副作用（选课占课 / 退选释放）在事务外执行，保证确定性
-        self._apply_business_side_effect(req, template, decision, new_status)
         return self.requests.get(request_no)
 
     def _require_node_approver(
@@ -499,6 +509,24 @@ class WorkflowEngine:
                     details={"request_no": req.request_no, "applicant": req.applicant_id,
                              "own_advisor": own_advisor},
                 )
+        # S3 纵深防御：辅导员节点仅本班学生申请可审（与 auto_review 班级过滤同口径；
+        # 申请人未分班时不拦截，保持既有行为）
+        if node.approver_role == C.ROLE_COUNSELOR:
+            srow = self.db.execute(
+                "SELECT class_id FROM users WHERE user_id=?", (req.applicant_id,)
+            ).fetchone()
+            applicant_class = srow["class_id"] if srow else ""
+            if applicant_class:
+                rows = self.db.execute(
+                    "SELECT class_id FROM classes WHERE counselor_id=?", (approver_id,)
+                ).fetchall()
+                my_classes = {r["class_id"] for r in rows if r["class_id"]}
+                if applicant_class not in my_classes:
+                    raise PermissionDeniedError(
+                        f"用户 {approver_id} 不是申请人 {req.applicant_id} 所在班级的辅导员",
+                        details={"request_no": req.request_no, "applicant": req.applicant_id,
+                                 "class_id": applicant_class},
+                    )
 
     def _side_effects_after_advance(
         self,
@@ -538,18 +566,21 @@ class WorkflowEngine:
             )
 
     def _apply_business_side_effect(
-        self, req: ApprovalRequest, template: ProcessTemplate, decision: str, new_status: str
+        self, req: ApprovalRequest, decision: str, new_status: str
     ) -> None:
-        """业务侧副作用：选课占课 / 退选释放（A2）。"""
+        """业务侧副作用：选课占课 / 退选释放（A2，DB 原子操作，随事务提交）。"""
         if req.process_type != C.PROCESS_COURSE_SELECTION:
             return
         course_ids = req.payload.get("course_ids") or []
         if decision == C.DECISION_APPROVE and is_terminal(new_status):
             for cid in course_ids:
-                R.enroll_course(cid)
+                if not self.courses.try_enroll(cid):
+                    raise ValidationError(
+                        f"课程 {cid} 名额已满", details={"course_id": cid}
+                    )
         elif decision == C.DECISION_REJECT:
             for cid in course_ids:
-                R.drop_course(cid)
+                self.courses.release(cid)
 
     # ------------------------------------------------------------------
     # 3. 归档（幂等：同单归档返回同一记录）

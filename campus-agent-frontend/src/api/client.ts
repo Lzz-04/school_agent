@@ -80,6 +80,8 @@ export const api = {
   listTemplates: () => req("/api/v1/process-types"),
   registerTemplate: (body: any) => req("/api/v1/process-types", { method: "POST", body: JSON.stringify(body) }),
   stats: () => req("/api/v1/dashboard/stats"),
+  metricsSummary: (days = 7) => req("/api/v1/metrics/summary?days=" + days),
+  approvalStats: (days = 7) => req("/api/v1/dashboard/approval-stats?days=" + days),
   audit: (limit = 100) => req("/api/v1/audit/events?limit=" + limit),
   dispatchOutbox: () => req("/api/v1/notifications/outbox/dispatch", { method: "POST" }),
   sendNotification: (body: any) => req("/api/v1/notifications", { method: "POST", body: JSON.stringify(body) }),

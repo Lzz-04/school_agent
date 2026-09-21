@@ -33,7 +33,7 @@ def test_a2_query_courses(engine):
 def test_a2_course_selection_full_flow(app):
     """选课无需审批：提交即自动通过，名额立即扣减。"""
     engine = app.engine
-    R.COURSE_ENROLLMENT["CS202"] = 0
+    engine.courses.set_enrolled("CS202", 0)
     # 满足先修课：CS202 需要 CS101，passed_courses 含 CS101
     req = engine.submit(
         applicant_id="S10001",
@@ -43,13 +43,13 @@ def test_a2_course_selection_full_flow(app):
     )
     assert req.status == C.STATUS_APPROVED
     assert req.current_node_id is None
-    assert R.COURSE_ENROLLMENT["CS202"] == 1  # 提交即占课
+    assert engine.courses.enrolled("CS202") == 1  # 提交即占课（DB 原子扣减）
 
 
 def test_a2_prerequisite_not_enforced(app):
     """先修要求已取消：不提供已修课也能选 PHY101。"""
     engine = app.engine
-    R.COURSE_ENROLLMENT["PHY101"] = 0
+    engine.courses.set_enrolled("PHY101", 0)
     req = engine.submit(
         applicant_id="S10001",
         process_type=C.PROCESS_COURSE_SELECTION,
@@ -61,7 +61,7 @@ def test_a2_prerequisite_not_enforced(app):
 def test_a2_quota_blocked(app):
     """名额已满 → 拦截（CS101 quota=2, enrolled=1 → 选两个即满第三个拒）。"""
     engine = app.engine
-    R.COURSE_ENROLLMENT["CS101"] = 2  # 模拟已满
+    engine.courses.set_enrolled("CS101", 2)  # 模拟已满
     with pytest.raises(ValidationError):
         engine.submit(
             applicant_id="S10001",
@@ -84,7 +84,7 @@ def test_a2_schedule_conflict_blocked(app):
 def test_a2_elective_open_to_all_majors(app):
     """选修课面向全校：非 CS/SE 专业选 CS202 不再拦截。"""
     engine = app.engine
-    R.COURSE_ENROLLMENT["CS202"] = 0
+    engine.courses.set_enrolled("CS202", 0)
     req = engine.submit(
         applicant_id="S10001",
         process_type=C.PROCESS_COURSE_SELECTION,

@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  backend:
+    name: Backend · pytest + coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: campus_agent_platform/requirements-dev.txt
+      - name: Install dependencies
+        run: pip install -r campus_agent_platform/requirements-dev.txt
+      # 从仓库根运行：--cov=campus_agent_platform 需指向包目录（在包目录内写同名会找不到模块）
+      - name: Run tests with coverage gate
+        run: |
+          python -m pytest campus_agent_platform/tests -q \
+            --cov=campus_agent_platform \
+            --cov-report=term-missing \
+            --cov-fail-under=80
+
+  frontend:
+    name: Frontend · test + type-check + build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: campus-agent-frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: campus-agent-frontend/package-lock.json
+      - name: Install dependencies
+        run: npm ci
+      - name: Unit tests (vitest)
+        run: npm test
+      - name: TypeScript check + production build
+        run: npm run build

@@ -1,10 +1,11 @@
-langgraph>=1.2
-langchain-core>=1.6
-fastapi>=0.141
-python-multipart>=0.0.9
-uvicorn>=0.53
-pydantic>=2.13
-pytest>=9.0
-httpx>=0.28
-PyJWT>=2.10
-python-dotenv>=1.0
+# 运行时依赖（版本已锁定，E5：与当前验证通过的 venv 一致）
+# 完整可复现锁见 requirements-dev.txt；此处仅运行时依赖，供生产镜像安装
+fastapi==0.141.1
+httpx==0.28.1
+langchain-core==1.6.3
+langgraph==1.2.11
+pydantic==2.13.5
+PyJWT==2.14.0
+python-dotenv==1.2.3
+python-multipart==0.0.32
+uvicorn==0.53.0
