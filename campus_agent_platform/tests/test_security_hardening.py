@@ -115,9 +115,13 @@ def test_auto_review_only_own_class(client):
 
     h_c = login_headers(client, "C30001", "123456")
     res = client.post("/api/v1/requests/auto-review", headers=h_c).json()
-    # S10001 的单被处理，S10002 的单因非本班被跳过
+    # S10001 的单被处理；S10002 的单因非本班被 SQL 直接过滤（S3/S4 语义：
+    # 只查本班待办，不再遍历全校）——不出现在任何结果中，且保持待审未被越权处理
     assert r1.json()["request_no"] in res["approved"]
-    assert any(s["request_no"] == r2.json()["request_no"] for s in res["skipped"])
+    assert all(s["request_no"] != r2.json()["request_no"] for s in res["skipped"])
+    assert r2.json()["request_no"] not in res["approved"]
+    assert r2.json()["request_no"] not in [x["request_no"] for x in res["rejected"]]
+    assert client.get(f"/api/v1/requests/{r2.json()['request_no']}", headers=h2).json()["status"] == "pending_counselor"
 
 
 # ----------------------------------------------------------------------

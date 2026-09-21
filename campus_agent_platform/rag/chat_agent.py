@@ -12,6 +12,7 @@ import time
 import uuid
 
 from ..storage.database import Database
+from ..storage.metrics import EVENT_CHAT_ASK
 from .form_validators import _ACTION_TO_SPEC, FORM_SPECS, form_prompt_section
 from .retriever import Retriever
 
@@ -91,12 +92,16 @@ def _extract_action_json(raw: str) -> dict | None:
 
 
 class ChatAgent:
-    def __init__(self, db: Database, retriever: Retriever | None = None, engine=None, user_id: str = ""):
+    def __init__(self, db: Database, retriever: Retriever | None = None, engine=None, user_id: str = "",
+                 metrics=None):
         self.db = db
         self.retriever = retriever or Retriever(db)
         self.engine = engine          # 对话工具：审批引擎（提交请假等）
         self.user_id = user_id        # 当前学生（由 ask 调用时覆盖）
+        self.metrics = metrics        # F1 可观测性：对话埋点（延迟/token/检索命中）
         self._pending_draft: dict | None = None  # 当轮 LLM 产出的申请表单草稿
+        self._llm_called = False      # 本轮是否走了 LLM（供埋点判断）
+        self._last_usage: dict | None = None    # 最近一次 LLM usage（OpenAI 兼容）
 
     def _role_of(self, user_id: str) -> str | None:
         """查用户角色；DB 无记录返回 None。"""
@@ -157,6 +162,7 @@ class ChatAgent:
         """attachments: [{"url": "...", "name": "...", "type": "image/file"}]"""
         attachments = attachments or []
         self.user_id = user_id
+        t0 = time.time()  # F1 埋点：对话全流程延迟（检索 + 生成 + 落库）
         # 1. 短期记忆：取最近 N 条
         recent = self.db.execute(
             "SELECT role, content, attachments FROM chat_messages WHERE session_id=? "
@@ -270,6 +276,25 @@ class ChatAgent:
         )
         self.db.commit()
 
+        # F1 埋点：对话延迟 / LLM token / 检索命中 chunk
+        usage = self._last_usage or {}
+        tokens_in = int(usage.get("prompt_tokens") or 0) if self._llm_called else 0
+        tokens_out = int(usage.get("completion_tokens") or 0) if self._llm_called else 0
+        if self.metrics is not None:
+            self.metrics.record(
+                event_type=EVENT_CHAT_ASK,
+                user_id=user_id,
+                session_id=session_id,
+                latency_ms=(time.time() - t0) * 1000,
+                tokens_in=tokens_in,
+                tokens_out=tokens_out,
+                retrieval_hits=len(hits),
+                llm_used=self._llm_called,
+                detail={"memory_turns": len(memory), "attachments": len(attachments)},
+            )
+        self._llm_called = False
+        self._last_usage = None
+
         return {
             "answer": answer,
             "citations": cited,
@@ -281,6 +306,8 @@ class ChatAgent:
     def _generate(self, question: str, memory: list[dict], hits: list[dict],
                   attachments: list[dict] | None = None) -> tuple[str, list[dict]]:
         """优先调 LLM 生成；未配置或调用失败时回退规则模板。"""
+        self._llm_called = False
+        self._last_usage = None
         cited = [
             {"chunk_id": h["chunk_id"], "title": h["title"], "category": h["category"]}
             for h in hits
@@ -291,6 +318,7 @@ class ChatAgent:
         llm = get_llm()
         if llm.enabled:
             try:
+                self._llm_called = True
                 answer = self._generate_with_llm(question, memory, hits, attachments or [])
                 return answer, cited
             except Exception as e:
@@ -425,11 +453,12 @@ class ChatAgent:
             messages.append({"role": "user", "content": text_part})
         llm = get_llm()
         try:
-            raw = llm.chat(system, messages, timeout=90.0)
+            raw, usage = llm.chat_with_usage(system, messages, timeout=90.0)
         except Exception:
             # 瞬时超时/失败：重试一次；仍失败由 _generate 回退规则模板（降级不丢可用性）
             time.sleep(1.0)
-            raw = llm.chat(system, messages, timeout=90.0)
+            raw, usage = llm.chat_with_usage(system, messages, timeout=90.0)
+        self._last_usage = usage
         return self._maybe_run_tool(raw)
 
     def _maybe_run_tool(self, raw: str) -> str:
@@ -531,7 +560,10 @@ class ChatAgent:
         from ..workflows import rules as R
         lines = [f"📚 本学期可选选修课（共 {len(R.COURSE_CATALOG)} 门）："]
         for cid, c in R.COURSE_CATALOG.items():
-            remain = c["quota"] - R.COURSE_ENROLLMENT.get(cid, 0)
+            if self.engine:
+                remain = self.engine.courses.remaining(cid)
+            else:
+                remain = max(0, c["quota"] - R.COURSE_ENROLLMENT_INITIAL.get(cid, 0))
             sched = c["schedule"]
             for en, cn in self._WEEKDAY_CN.items():
                 sched = sched.replace(en, cn)
@@ -599,41 +631,22 @@ class ChatAgent:
         return "\n".join(lines)
 
     def _run_auto_review(self) -> str:
-        """按规则自动审核当前辅导员的待办请假单，返回自然语言摘要。"""
-        from ..workflows import rules as R
-        approver = self.user_id
-        all_reqs = self.engine.requests.list_all()
-        approves, rejects, skipped = [], [], []
-        for r in all_reqs:
-            if r.process_type != "leave":
-                continue
-            if r.status != "pending_counselor":
-                continue
-            violations, days = R.evaluate_leave_auto_review(
-                r.payload or {}, r.attachment_urls or []
-            )
-            if days > 7:
-                skipped.append((r.request_no, f"请假{days}天需学校领导审"))
-                continue
-            if violations:
-                try:
-                    self.engine.advance(request_no=r.request_no, approver_id=approver,
-                                        decision="reject", comment="自动驳回：" + "；".join(violations))
-                    rejects.append((r.request_no, violations))
-                except Exception as e:
-                    skipped.append((r.request_no, str(e)))
-                continue
-            try:
-                self.engine.advance(request_no=r.request_no, approver_id=approver,
-                                     decision="approve", comment="自动通过：符合规则")
-                approves.append(r.request_no)
-            except Exception as e:
-                skipped.append((r.request_no, str(e)))
+        """按规则自动审核当前辅导员的待办请假单，返回自然语言摘要。
+
+        S3/S4 修复：与 API 端共用 ApprovalService.auto_review 单一入口——
+        班级过滤收敛到服务层，且按 status+班级 SQL 直查，
+        不再遍历全校待办、不受 list_all LIMIT 100 截断。
+        """
+        from ..workflows.approval_service import ApprovalService
+        result = ApprovalService(self.engine).auto_review(self.user_id)
+        approves = result["approved"]
+        rejects = result["rejected"]
+        skipped = result["skipped"]
         parts = [f"自动审核完成：通过 {len(approves)} 条，驳回 {len(rejects)} 条，跳过 {len(skipped)} 条。"]
         if approves:
             parts.append("通过单号：" + "、".join(approves))
-        for no, vs in rejects:
-            parts.append(f"驳回 {no}：" + "；".join(vs))
-        for no, why in skipped:
-            parts.append(f"跳过 {no}：{why}")
+        for item in rejects:
+            parts.append(f"驳回 {item['request_no']}：" + "；".join(item["reasons"]))
+        for item in skipped:
+            parts.append(f"跳过 {item['request_no']}：{item['reason']}")
         return "\n".join(parts)

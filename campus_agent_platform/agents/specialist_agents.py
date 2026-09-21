@@ -90,9 +90,15 @@ def communication_specialist_node(state: AgentState) -> dict[str, Any]:
 
 
 def file_specialist_node(state: AgentState) -> dict[str, Any]:
-    """归档审计 Agent：绑定 archive_record（幂等，终态归档 + 哈希）。"""
+    """归档审计 Agent：绑定 archive_record（幂等，终态归档 + 哈希）。
+
+    S2 修复：归档操作人身份取自编排输入（API 层注入 JWT 当前用户），
+    不再硬编码 SYS001——避免任意登录用户借系统角色越权归档终态单；
+    SYS001 仅保留给系统内部调用（种子模板/CLI）。
+    """
     request_no = state.get("request_no", "")
-    res = tools.call_tool("archive_record", request_no=request_no, actor_id="SYS001")
+    actor_id = state.get("actor_id") or "SYS001"
+    res = tools.call_tool("archive_record", request_no=request_no, actor_id=actor_id)
     state["context"]["archive"] = res
     _mark_completed(state, "archive_record")
     state["next_agent"] = "END"
@@ -103,13 +109,17 @@ def file_specialist_node(state: AgentState) -> dict[str, Any]:
 
 
 def development_specialist_node(state: AgentState) -> dict[str, Any]:
-    """流程引擎扩展 Agent：绑定 register_process_type（模板版本化，不改引擎）。"""
+    """流程引擎扩展 Agent：绑定 register_process_type（模板版本化，不改引擎）。
+
+    同源修复（S2 同款）：注册操作人身份取自编排输入（API 层注入 JWT 当前用户），
+    不再静默回退 SYS001——避免任意登录用户借系统角色注册流程模板。
+    """
     res = tools.call_tool(
         "register_process_type",
         process_type=state.get("process_type", ""),
         nodes=state.get("payload", {}).get("nodes", []),
         validation_rules=state.get("payload", {}).get("validation_rules", []),
-        actor_id=state.get("approver_id") or "SYS001",
+        actor_id=state.get("actor_id") or "SYS001",
     )
     state["context"]["register"] = res
     _mark_completed(state, "register_process_type")

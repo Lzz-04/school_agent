@@ -32,6 +32,7 @@ from ..configs.settings import settings as app_settings
 from ..domain import constants as C
 from ..domain.errors import DomainError
 from ..domain.models import AuditEvent
+from ..storage.metrics import EVENT_AGENT_RUN
 from ..storage.repository import TemplateRepository
 from ..tools import registry as tools
 from ..workflows import rules as R
@@ -192,6 +193,15 @@ def create_app(app_container: CampusAgentApp | None = None) -> FastAPI:
         payload = decode_token(auth[7:])
         if payload is None:
             raise HTTPException(status_code=401, detail="登录已过期，请重新登录")
+        # JWT 撤销（S6）：每次请求回查 DB——账号被禁用或改密（token_version 递增）后，
+        # 已签发 token 立即失效，而不是等到 8 小时自然过期
+        row = _c().db.execute(
+            "SELECT status, token_version FROM users WHERE user_id=?", (payload["sub"],)
+        ).fetchone()
+        if row is None or row["status"] != "active":
+            raise HTTPException(status_code=401, detail="登录已过期，请重新登录")
+        if row["token_version"] != payload.get("ver", 0):
+            raise HTTPException(status_code=401, detail="登录已过期，请重新登录")
         return {"user_id": payload["sub"], "role": payload["role"], "name": payload.get("name", "")}
 
     def _require_admin(user: dict = Depends(_current_user)) -> dict:
@@ -274,46 +284,8 @@ def create_app(app_container: CampusAgentApp | None = None) -> FastAPI:
         """辅导员端一键自动审核：仅辅导员角色可用，且只审核本班学生的待办请假单。"""
         if user["role"] != "counselor":
             raise HTTPException(status_code=403, detail="仅辅导员可执行自动审核")
-        approver_id = user["user_id"]
-        engine = _c().engine
-        rows = engine.db.execute(
-            "SELECT class_id FROM classes WHERE counselor_id=?", (approver_id,)
-        ).fetchall()
-        my_class_ids = {r["class_id"] for r in rows if r["class_id"]}
-        all_reqs = engine.requests.list_all()
-        approves, rejects, skipped = [], [], []
-        for r in all_reqs:
-            if r.process_type != "leave":
-                continue
-            if r.status != "pending_counselor":
-                continue
-            srow = engine.db.execute(
-                "SELECT class_id FROM users WHERE user_id=?", (r.applicant_id,)
-            ).fetchone()
-            if not srow or (srow["class_id"] or "") not in my_class_ids:
-                skipped.append({"request_no": r.request_no, "reason": "非本班学生申请"})
-                continue
-            violations, days = R.evaluate_leave_auto_review(
-                r.payload or {}, r.attachment_urls or []
-            )
-            if days > 7:
-                skipped.append({"request_no": r.request_no, "reason": f"请假{days}天，需学校领导审批"})
-                continue
-            if violations:
-                try:
-                    engine.advance(request_no=r.request_no, approver_id=approver_id,
-                                   decision="reject", comment="自动驳回：" + "；".join(violations))
-                    rejects.append({"request_no": r.request_no, "reasons": violations})
-                except Exception as e:
-                    skipped.append({"request_no": r.request_no, "reason": str(e)})
-                continue
-            try:
-                engine.advance(request_no=r.request_no, approver_id=approver_id,
-                               decision="approve", comment="自动通过：符合规则")
-                approves.append(r.request_no)
-            except Exception as e:
-                skipped.append({"request_no": r.request_no, "reason": str(e)})
-        return {"approved": approves, "rejected": rejects, "skipped": skipped}
+        from ..workflows.approval_service import ApprovalService
+        return ApprovalService(_c().engine).auto_review(user["user_id"])
 
     # ------------------------- 流程模板 -------------------------
     @app.post("/api/v1/process-types", status_code=201)
@@ -343,7 +315,7 @@ def create_app(app_container: CampusAgentApp | None = None) -> FastAPI:
             if exists:
                 c = R.COURSE_CATALOG[cid]
                 item.update({k: v for k, v in c.items()})
-                item["enrolled"] = R.COURSE_ENROLLMENT.get(cid, 0)
+                item["enrolled"] = _c().engine.courses.enrolled(cid)
                 item["remaining"] = max(0, c["quota"] - item["enrolled"])
             out[cid] = item
         return {"courses": out}
@@ -413,15 +385,60 @@ def create_app(app_container: CampusAgentApp | None = None) -> FastAPI:
     @app.post("/api/v1/agent/run")
     def run_agent(body: AgentRunRequest, user: dict = Depends(_current_user)):
         """端到端运行多 Agent 编排（supervisor + 专业 Agent）；身份取自 JWT，防止冒充他人操作。"""
+        import time as _t
+        t0 = _t.time()
         data = body.model_dump()
         # 编排输入里的申请人/审批人一律以当前登录身份为准，防止借编排接口伪造身份
         data["applicant_id"] = user["user_id"]
         if data.get("approver_id"):
             data["approver_id"] = user["user_id"]
+        engine = _c().engine
+        intent = data.get("intent", "")
+        if intent == "status" and data.get("request_no"):
+            req = engine.requests.get_optional(data["request_no"])
+            if req is not None and not _request_visible_to(engine, req, user):
+                raise HTTPException(status_code=403, detail="无权查看该申请")
+        if intent in ("archive", "register"):
+            data["actor_id"] = user["user_id"]
         result = _c().graph.run(**data)
+        # F1 埋点：编排延迟 / 意图 / 结果（失败也记录；埋点自身失败不影响响应）
+        _c().metrics.record(
+            event_type=EVENT_AGENT_RUN,
+            user_id=user["user_id"],
+            intent=intent,
+            latency_ms=(_t.time() - t0) * 1000,
+            detail={"ok": bool(result.get("ok")), "intent": intent},
+        )
         if not result.get("ok"):
-            raise HTTPException(status_code=422, detail=result)
+            # 权限类失败 → 403（语义正确）；其余保持 422（兼容既有失败语义）
+            # 错误码取两条路径：graph 异常透传（error_code）或工具收敛（result.error.code）
+            code = result.get("error_code")
+            inner = result.get("result")
+            inner_err = inner.get("error") if isinstance(inner, dict) else None
+            if code is None and isinstance(inner_err, dict):
+                code = inner_err.get("code")
+            status = 403 if code == "permission_denied" else 422
+            raise HTTPException(status_code=status, detail=result)
         return result
+
+    # ------------------------- 可观测性 / 审批驾驶舱（仅管理员） -------------------------
+    @app.get("/api/v1/metrics/summary")
+    def metrics_summary(days: int = Query(default=7, ge=1, le=90),
+                        _: dict = Depends(_require_admin)):
+        """F1：对话/编排埋点聚合（token / 延迟 P50/P95 / 检索命中 / 每日趋势）。"""
+        return _c().metrics.summary(days)
+
+    @app.post("/api/v1/metrics/cleanup")
+    def metrics_cleanup(days: int = Query(default=90, ge=1, le=3650),
+                        _: dict = Depends(_require_admin)):
+        """F1 配套：清理超过保留期的埋点（默认 90 天），返回删除条数。"""
+        return {"deleted": _c().metrics.cleanup(retention_days=days)}
+
+    @app.get("/api/v1/dashboard/approval-stats")
+    def dashboard_approval_stats(days: int = Query(default=7, ge=1, le=90),
+                                 _: dict = Depends(_require_admin)):
+        """F2：审批驾驶舱——按流程类型/审批人统计耗时、积压、SLA 逾期与趋势。"""
+        return _c().approval_stats.stats(days)
 
     # ------------------------- 仪表盘（仅管理员） -------------------------
     @app.get("/api/v1/dashboard/stats")
@@ -624,9 +641,16 @@ def create_app(app_container: CampusAgentApp | None = None) -> FastAPI:
         """表单提交/取消后，把状态写回 form_draft：_submitted 或 _cancelled。
         切会话回来仍按此状态渲染，不再重复弹"编辑中"卡片。"""
         import json as _json
-        row = _c().db.execute("SELECT form_draft FROM chat_messages WHERE id=? AND role=?", (message_id, "assistant")).fetchone()
+        row = _c().db.execute(
+            "SELECT m.form_draft, s.user_id AS owner_id FROM chat_messages m"
+            " JOIN chat_sessions s ON s.session_id = m.session_id"
+            " WHERE m.id=? AND m.role=?",
+            (message_id, "assistant"),
+        ).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="消息不存在")
+        if row["owner_id"] != user["user_id"] and user["role"] != "admin":
+            raise HTTPException(status_code=403, detail="无权修改该消息")
         try:
             draft = _json.loads(row["form_draft"] or "{}")
         except Exception:

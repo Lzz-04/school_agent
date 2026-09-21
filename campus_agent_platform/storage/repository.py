@@ -135,6 +135,25 @@ class RequestRepository:
         ).fetchall()
         return [self._row_to_model(r) for r in rows]
 
+    def list_pending_leave_by_class(self, class_ids: set[str]) -> list[ApprovalRequest]:
+        """按待审节点 + 班级直接 SQL 查询请假单（走索引，不遍历全表）。
+
+        供 auto_review 使用（S4 修复）：只取本班 pending_counselor 请假单，
+        避免 list_all() 的 LIMIT 100 在待办超量时漏审旧单。
+        """
+        if not class_ids:
+            return []
+        placeholders = ",".join("?" * len(class_ids))
+        rows = self.db.execute(
+            "SELECT ar.* FROM approval_requests ar"
+            " JOIN users u ON u.user_id = ar.applicant_id"
+            f" WHERE ar.status = ? AND ar.process_type = 'leave'"
+            f" AND u.class_id IN ({placeholders})"
+            " ORDER BY ar.created_at ASC",
+            (f"{C.STATUS_PENDING_PREFIX}counselor", *sorted(class_ids)),
+        ).fetchall()
+        return [self._row_to_model(r) for r in rows]
+
     # ------------------------------------------------------------------
     @staticmethod
     def _row_to_model(row: sqlite3.Row) -> ApprovalRequest:

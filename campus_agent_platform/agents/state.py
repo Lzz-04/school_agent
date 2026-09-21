@@ -29,6 +29,7 @@ class AgentState(TypedDict, total=False):
     approver_id: str
     decision: str
     comment: str
+    actor_id: str                    # 操作人（归档/注册等系统动作的实际身份；API 层注入 JWT 当前用户）
 
     # --- 编排状态 ---
     tasks: list[str]
@@ -65,6 +66,7 @@ def new_state(**kwargs: Any) -> AgentState:
         "approver_id": kwargs.get("approver_id", ""),
         "decision": kwargs.get("decision", ""),
         "comment": kwargs.get("comment", ""),
+        "actor_id": kwargs.get("actor_id", ""),
         "tasks": [],
         "completed_tasks": [],
         "next_agent": "END",
