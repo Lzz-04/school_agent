@@ -26,6 +26,7 @@ from ..agents.specialist_agents import (
 from ..agents.state import AgentState, new_state
 from ..agents.supervisor_agent import aggregate_result, route_after_supervisor, supervisor_node
 from ..configs.settings import settings
+from ..domain.errors import DomainError
 from ..workflows.engine import WorkflowEngine
 
 logger = logging.getLogger(__name__)
@@ -104,6 +105,11 @@ class ApprovalAgentGraph:
             final = self.graph.invoke(state)
         except Exception as exc:  # noqa: BLE001 - 编排异常收敛为结构化结果
             logger.exception("Agent 编排执行失败")
+            # 领域错误透传结构化 code/status_code（供 API 层映射 HTTP 语义，如 403/409/429）
+            if isinstance(exc, DomainError):
+                return {"ok": False, "intent": state.get("intent"), "error": exc.message,
+                        "error_code": exc.code, "status_code": exc.status_code,
+                        "result": None, "context": state.get("context", {})}
             return {"ok": False, "intent": state.get("intent"), "error": str(exc),
                     "result": None, "context": state.get("context", {})}
         final["result"] = aggregate_result(final)

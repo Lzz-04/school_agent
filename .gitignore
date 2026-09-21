@@ -24,3 +24,17 @@ build/
 uploads/
 .test_data/
 *.log
+.coverage
+htmlcov/
+
+# 本地备份与临时截图（保留在磁盘，不进仓库）
+*.bak_*
+*.tmp_*
+_i*.png
+issue_screenshot*.png
+avatar.png
+
+# 个人求职材料（保留在磁盘，不进仓库）
+gen_resume.py
+resume_*
+*简历*

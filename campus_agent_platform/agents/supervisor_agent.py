@@ -148,7 +148,10 @@ def _supervise_archive(state: AgentState) -> dict[str, Any]:
         state["next_agent"] = "file_specialist"
         return dict(state)
     state["next_agent"] = "END"
-    state["result"] = {"ok": True, "request_no": state["request_no"]}
+    # 修复：专业 Agent 已标记错误时保留其结构化失败结果，不再覆盖为 ok:True
+    # （否则工具收敛的 error.code 会丢失，API 层无法映射 403）
+    if state.get("error") is None:
+        state["result"] = {"ok": True, "request_no": state["request_no"]}
     return dict(state)
 
 
@@ -159,7 +162,9 @@ def _supervise_register(state: AgentState) -> dict[str, Any]:
         state["next_agent"] = "development_specialist"
         return dict(state)
     state["next_agent"] = "END"
-    state["result"] = {"ok": True, "process_type": state.get("process_type")}
+    # 修复：同上，保留专业 Agent 的结构化失败结果
+    if state.get("error") is None:
+        state["result"] = {"ok": True, "process_type": state.get("process_type")}
     return dict(state)
 
 
