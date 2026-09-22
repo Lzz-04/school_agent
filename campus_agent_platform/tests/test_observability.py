@@ -19,6 +19,13 @@ from campus_agent_platform.api.app import create_app
 from campus_agent_platform.domain import constants as C
 from campus_agent_platform.storage.metrics import EVENT_AGENT_RUN, EVENT_CHAT_ASK
 
+from datetime import date, timedelta
+
+
+def _D(n: int) -> str:
+    """相对今天的日期（今天+n 天），避免测试因日期过期而腐烂"""
+    return (date.today() + timedelta(days=n)).isoformat()
+
 
 @pytest.fixture()
 def client(app):
@@ -75,8 +82,8 @@ def test_agent_run_records_metric(client):
         "intent": "submit",
         "applicant_id": "S10001",
         "process_type": C.PROCESS_LEAVE,
-        "payload": {"leave_type": "sick", "start_date": "2026-09-25",
-                    "end_date": "2026-09-26", "reason": "就医"},
+        "payload": {"leave_type": "sick", "start_date": _D(4),
+                    "end_date": _D(5), "reason": "就医"},
         "client_request_no": "OBS-AGENT-001",
     }, headers=h)
     assert r.status_code == 200
@@ -106,8 +113,8 @@ def test_approval_stats_by_process_type_and_approver(app):
     req = engine.submit(
         applicant_id="S10001",
         process_type=C.PROCESS_LEAVE,
-        payload={"leave_type": "sick", "start_date": "2026-09-21",
-                 "end_date": "2026-09-22", "reason": "就医"},
+        payload={"leave_type": "sick", "start_date": _D(0),
+                 "end_date": _D(1), "reason": "就医"},
         client_request_no="OBS-1",
     )
     app.db.execute("UPDATE approval_requests SET created_at=? WHERE request_no=?",
@@ -117,8 +124,8 @@ def test_approval_stats_by_process_type_and_approver(app):
     req2 = engine.submit(
         applicant_id="S10002",
         process_type=C.PROCESS_LEAVE,
-        payload={"leave_type": "personal", "start_date": "2026-09-25",
-                 "end_date": "2026-09-26", "reason": "家事"},
+        payload={"leave_type": "personal", "start_date": _D(4),
+                 "end_date": _D(5), "reason": "家事"},
         client_request_no="OBS-2",
     )
     # 3) 辅导员通过新单（2 天假只有辅导员节点）→ 直接终态 approved（已办 +1）

@@ -8,6 +8,13 @@ from fastapi.testclient import TestClient
 from campus_agent_platform.api.app import create_app
 from campus_agent_platform.domain import constants as C
 
+from datetime import date, timedelta
+
+
+def _D(n: int) -> str:
+    """相对今天的日期（今天+n 天），避免测试因日期过期而腐烂"""
+    return (date.today() + timedelta(days=n)).isoformat()
+
 
 @pytest.fixture()
 def client(app):
@@ -31,8 +38,8 @@ def test_submit_and_status(client):
     r = client.post("/api/v1/requests", json={
         "applicant_id": "S10001",
         "process_type": C.PROCESS_LEAVE,
-        "payload": {"leave_type": "sick", "start_date": "2026-09-21",
-                    "end_date": "2026-09-22", "reason": "就医"},
+        "payload": {"leave_type": "sick", "start_date": _D(0),
+                    "end_date": _D(1), "reason": "就医"},
         "client_request_no": "API-001",
     }, headers=h)
     assert r.status_code == 201
@@ -50,8 +57,8 @@ def test_advance_and_archive(client):
     r = client.post("/api/v1/requests", json={
         "applicant_id": "S10001",
         "process_type": C.PROCESS_LEAVE,
-        "payload": {"leave_type": "sick", "start_date": "2026-09-21",
-                    "end_date": "2026-09-25", "reason": "就医"},
+        "payload": {"leave_type": "sick", "start_date": _D(0),
+                    "end_date": _D(4), "reason": "就医"},
     }, headers=h_stu)
     rn = r.json()["request_no"]
 
@@ -77,8 +84,8 @@ def test_permission_denied_via_api(client):
     r = client.post("/api/v1/requests", json={
         "applicant_id": "S10001",
         "process_type": C.PROCESS_LEAVE,
-        "payload": {"leave_type": "sick", "start_date": "2026-09-21",
-                    "end_date": "2026-09-22", "reason": "就医"},
+        "payload": {"leave_type": "sick", "start_date": _D(0),
+                    "end_date": _D(1), "reason": "就医"},
     }, headers=h)
     rn = r.json()["request_no"]
     r = client.post(f"/api/v1/requests/{rn}/advance", json={
@@ -116,8 +123,8 @@ def test_audit_events(client):
     client.post("/api/v1/requests", json={
         "applicant_id": "S10001",
         "process_type": C.PROCESS_LEAVE,
-        "payload": {"leave_type": "sick", "start_date": "2026-09-21",
-                    "end_date": "2026-09-22", "reason": "就医"},
+        "payload": {"leave_type": "sick", "start_date": _D(0),
+                    "end_date": _D(1), "reason": "就医"},
     }, headers=h_stu)
     h_admin = login_headers(client)
     r = client.get("/api/v1/audit/events", headers=h_admin)
@@ -139,8 +146,8 @@ def test_agent_run_submit(client):
         "intent": "submit",
         "applicant_id": "S10001",
         "process_type": C.PROCESS_LEAVE,
-        "payload": {"leave_type": "sick", "start_date": "2026-09-25",
-                    "end_date": "2026-09-26", "reason": "就医"},
+        "payload": {"leave_type": "sick", "start_date": _D(4),
+                    "end_date": _D(5), "reason": "就医"},
         "client_request_no": "API-AGENT-001",
     }, headers=h)
     assert r.status_code == 200

@@ -13,12 +13,19 @@ import pytest
 from campus_agent_platform.domain import constants as C
 from campus_agent_platform.domain.errors import OptimisticLockError, PermissionDeniedError
 
+from datetime import date, timedelta
+
+
+def _D(n: int) -> str:
+    """相对今天的日期（今天+n 天），避免测试因日期过期而腐烂"""
+    return (date.today() + timedelta(days=n)).isoformat()
+
 
 def _submit_leave(engine, client_no=None, days=5):
     return engine.submit(
         applicant_id="S10001",
         process_type=C.PROCESS_LEAVE,
-        payload={"leave_type": "sick", "start_date": "2026-09-21",
+        payload={"leave_type": "sick", "start_date": _D(0),
                  "end_date": f"2026-09-{20 + days}", "reason": "就医"},
         client_request_no=client_no,
     )

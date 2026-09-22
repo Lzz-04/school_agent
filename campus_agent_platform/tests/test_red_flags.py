@@ -18,13 +18,20 @@ from campus_agent_platform.domain.errors import (
     ValidationError,
 )
 
+from datetime import date, timedelta
+
+
+def _D(n: int) -> str:
+    """相对今天的日期（今天+n 天），避免测试因日期过期而腐烂"""
+    return (date.today() + timedelta(days=n)).isoformat()
+
 
 def _submit_leave(engine, applicant="S10001"):
     return engine.submit(
         applicant_id=applicant,
         process_type=C.PROCESS_LEAVE,
-        payload={"leave_type": "sick", "start_date": "2026-09-21",
-                 "end_date": "2026-09-22", "reason": "就医"},
+        payload={"leave_type": "sick", "start_date": _D(0),
+                 "end_date": _D(1), "reason": "就医"},
     )
 
 
@@ -73,8 +80,8 @@ def test_red_flag_state_inconsistency(app):
     draft = engine.submit(
         applicant_id="S10001",
         process_type=C.PROCESS_LEAVE,
-        payload={"leave_type": "sick", "start_date": "2026-09-23",
-                 "end_date": "2026-09-24", "reason": "x"},
+        payload={"leave_type": "sick", "start_date": _D(2),
+                 "end_date": _D(3), "reason": "x"},
     )
     with pytest.raises(StateTransitionError):
         engine.archive(request_no=draft.request_no, actor_id="SYS001")

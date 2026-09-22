@@ -15,6 +15,13 @@ from fastapi.testclient import TestClient
 
 from campus_agent_platform.api.app import create_app
 
+from datetime import date, timedelta
+
+
+def _D(n: int) -> str:
+    """相对今天的日期（今天+n 天），避免测试因日期过期而腐烂"""
+    return (date.today() + timedelta(days=n)).isoformat()
+
 
 @pytest.fixture()
 def client(app):
@@ -27,7 +34,7 @@ def login_headers(client, username: str = "admin", password: str = "admin123") -
     return {"Authorization": "Bearer " + r.json()["token"]}
 
 
-def submit_leave(client, headers, start="2026-09-21", end="2026-09-22", key=None, leave_type="personal"):
+def submit_leave(client, headers, start=_D(0), end=_D(1), key=None, leave_type="personal"):
     body = {
         "applicant_id": "S10001",
         "process_type": "leave",

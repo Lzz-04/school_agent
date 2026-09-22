@@ -19,6 +19,13 @@ from campus_agent_platform.domain import constants as C
 from campus_agent_platform.domain.errors import ValidationError
 from campus_agent_platform.workflows import rules as R
 
+from datetime import date, timedelta
+
+
+def _D(n: int) -> str:
+    """相对今天的日期（今天+n 天），避免测试因日期过期而腐烂"""
+    return (date.today() + timedelta(days=n)).isoformat()
+
 
 def _leave_payload(days: int = 2, start: str | None = None, **overrides):
     """构造请假 payload，从明天起连续 days 天。"""
@@ -173,6 +180,6 @@ def test_a1_rule_validation_blocked(app):
 
 def test_a1_leave_days_calculation():
     """天数计算：含首尾自然日。"""
-    assert R.leave_days({"start_date": "2026-09-21", "end_date": "2026-09-22"}) == 2
-    assert R.leave_days({"start_date": "2026-09-21", "end_date": "2026-09-25"}) == 5
-    assert R.leave_days({"start_date": "2026-09-21", "end_date": "2026-09-30"}) == 10
+    assert R.leave_days({"start_date": _D(0), "end_date": _D(1)}) == 2
+    assert R.leave_days({"start_date": _D(0), "end_date": _D(4)}) == 5
+    assert R.leave_days({"start_date": _D(0), "end_date": _D(9)}) == 10

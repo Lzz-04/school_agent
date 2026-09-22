@@ -12,6 +12,13 @@ from campus_agent_platform.domain import constants as C
 from campus_agent_platform.domain.errors import ValidationError
 from campus_agent_platform.workflows import rules as R
 
+from datetime import date, timedelta
+
+
+def _D(n: int) -> str:
+    """相对今天的日期（今天+n 天），避免测试因日期过期而腐烂"""
+    return (date.today() + timedelta(days=n)).isoformat()
+
 
 def _reimb_payload(amount=200.0, category="textbook", receipts=None, **overrides):
     half = amount / 2.0

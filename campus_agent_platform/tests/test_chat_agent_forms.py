@@ -12,6 +12,13 @@ import pytest
 
 from campus_agent_platform.rag.chat_agent import _ACTION_TO_SPEC, FORM_SPECS
 
+from datetime import date, timedelta
+
+
+def _D(n: int) -> str:
+    """相对今天的日期（今天+n 天），避免测试因日期过期而腐烂"""
+    return (date.today() + timedelta(days=n)).isoformat()
+
 
 @pytest.fixture()
 def chat(app):

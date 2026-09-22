@@ -36,6 +36,8 @@ logger = logging.getLogger("campus-agent")
 
 def demo_leave_flow() -> None:
     """请假动态分级审批演示：10 天请假走 辅导员→学院领导→学校领导→归档。"""
+    from datetime import date, timedelta
+
     from campus_agent_platform.app import CampusAgentApp
     from campus_agent_platform.domain import constants as C
     from campus_agent_platform.workflows import rules as R
@@ -54,8 +56,8 @@ def demo_leave_flow() -> None:
         process_type=C.PROCESS_LEAVE,
         payload={
             "leave_type": "sick",
-            "start_date": "2026-09-21",
-            "end_date": "2026-09-30",
+            "start_date": date.today().isoformat(),
+            "end_date": (date.today() + timedelta(days=9)).isoformat(),
             "reason": "生病就医",
         },
         attachment_urls=["https://campus.example/att/med1.pdf"],
@@ -148,6 +150,8 @@ def demo_leave_flow() -> None:
 
 def demo_graph_run() -> None:
     """走 LangGraph 编排：supervisor → data_specialist → communication_specialist → END。"""
+    from datetime import date, timedelta
+
     from campus_agent_platform.app import CampusAgentApp
 
     app = CampusAgentApp()
@@ -157,8 +161,8 @@ def demo_graph_run() -> None:
         process_type="leave",
         payload={
             "leave_type": "personal",
-            "start_date": "2026-09-28",
-            "end_date": "2026-09-29",
+            "start_date": date.today().isoformat(),
+            "end_date": (date.today() + timedelta(days=1)).isoformat(),
             "reason": "家中有事",
         },
         client_request_no="CLI-GRAPH-001",

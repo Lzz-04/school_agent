@@ -7,6 +7,13 @@ import pytest
 from campus_agent_platform.auth import AuthError, decode_token, issue_token, verify_password
 from campus_agent_platform.auth.security import hash_password
 
+from datetime import date, timedelta
+
+
+def _D(n: int) -> str:
+    """相对今天的日期（今天+n 天），避免测试因日期过期而腐烂"""
+    return (date.today() + timedelta(days=n)).isoformat()
+
 
 def test_password_hash_roundtrip():
     h, s = hash_password("mypassword")

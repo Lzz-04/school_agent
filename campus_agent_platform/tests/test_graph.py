@@ -4,6 +4,13 @@ from __future__ import annotations
 
 from campus_agent_platform.domain import constants as C
 
+from datetime import date, timedelta
+
+
+def _D(n: int) -> str:
+    """相对今天的日期（今天+n 天），避免测试因日期过期而腐烂"""
+    return (date.today() + timedelta(days=n)).isoformat()
+
 
 def test_graph_submit_flow(graph):
     """submit 意图：supervisor → data_specialist → communication_specialist → END。"""
@@ -11,8 +18,8 @@ def test_graph_submit_flow(graph):
         intent="submit",
         applicant_id="S10001",
         process_type=C.PROCESS_LEAVE,
-        payload={"leave_type": "sick", "start_date": "2026-09-21",
-                 "end_date": "2026-09-22", "reason": "就医"},
+        payload={"leave_type": "sick", "start_date": _D(0),
+                 "end_date": _D(1), "reason": "就医"},
         client_request_no="GRAPH-001",
     )
     assert result["ok"] is True
@@ -43,8 +50,8 @@ def test_graph_advance_flow(graph, app):
     req = engine.submit(
         applicant_id="S10001",
         process_type=C.PROCESS_LEAVE,
-        payload={"leave_type": "sick", "start_date": "2026-09-21",
-                 "end_date": "2026-09-25", "reason": "就医"},
+        payload={"leave_type": "sick", "start_date": _D(0),
+                 "end_date": _D(4), "reason": "就医"},
     )
     result = graph.run(
         intent="advance",
@@ -63,8 +70,8 @@ def test_graph_archive_flow(graph, app):
     req = engine.submit(
         applicant_id="S10001",
         process_type=C.PROCESS_LEAVE,
-        payload={"leave_type": "sick", "start_date": "2026-09-21",
-                 "end_date": "2026-09-25", "reason": "就医"},
+        payload={"leave_type": "sick", "start_date": _D(0),
+                 "end_date": _D(4), "reason": "就医"},
     )
     engine.advance(request_no=req.request_no, approver_id="C30001", decision=C.DECISION_APPROVE)
     engine.advance(request_no=req.request_no, approver_id="A20001", decision=C.DECISION_APPROVE)
@@ -95,8 +102,8 @@ def test_graph_status_flow(graph, app):
     req = engine.submit(
         applicant_id="S10001",
         process_type=C.PROCESS_LEAVE,
-        payload={"leave_type": "sick", "start_date": "2026-09-21",
-                 "end_date": "2026-09-22", "reason": "就医"},
+        payload={"leave_type": "sick", "start_date": _D(0),
+                 "end_date": _D(1), "reason": "就医"},
     )
     result = graph.run(intent="status", request_no=req.request_no)
     assert result["ok"] is True

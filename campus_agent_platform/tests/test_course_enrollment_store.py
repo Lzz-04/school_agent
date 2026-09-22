@@ -16,6 +16,13 @@ from campus_agent_platform.domain import constants as C
 from campus_agent_platform.domain.errors import ValidationError
 from campus_agent_platform.workflows import rules as R
 
+from datetime import date, timedelta
+
+
+def _D(n: int) -> str:
+    """相对今天的日期（今天+n 天），避免测试因日期过期而腐烂"""
+    return (date.today() + timedelta(days=n)).isoformat()
+
 
 def test_store_seeded_from_catalog_and_initial(app):
     """种子：全部课程建行，初始在册基线生效；重复构造不覆盖。"""
