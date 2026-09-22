@@ -55,3 +55,4 @@ gen_lifecycle_report.py
 leave_business_test.py
 seed_lifecycle_users.py
 verify_parser.py
+lifecycle_lifecycle_test.py
