@@ -38,3 +38,20 @@ avatar.png
 gen_resume.py
 resume_*
 *简历*
+
+# 仓库瘦身：根目录非代码文件（保留在磁盘，不进仓库）
+/*.md
+/*.html
+/*.json
+/*.txt
+/*.png
+.patch*.py
+.enable_doc.py
+.q.py
+.seed.py
+eval_chat_agent.py
+fix_c30001_user.py
+gen_lifecycle_report.py
+leave_business_test.py
+seed_lifecycle_users.py
+verify_parser.py
